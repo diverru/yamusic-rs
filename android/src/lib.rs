@@ -269,8 +269,7 @@ fn logout(ui: &App, player: &Player) {
             }
         });
     }
-    c.forget_token();
-    c.forget_refresh();
+    c.forget_account();
     c.token_expires = None;
     c.save();
     profile::clear(ui);
