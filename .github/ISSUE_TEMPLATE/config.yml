@@ -2,4 +2,4 @@ blank_issues_enabled: true
 contact_links:
   - name: Уязвимость
     url: https://github.com/SpolzerMod/yamusic-rs/security/advisories/new
-    about: Проблемы с безопасностью токена или обновлений — сюда, не в публичный issue.
+    about: Проблемы с безопасностью токена — сюда, не в публичный issue.

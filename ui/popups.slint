@@ -62,7 +62,7 @@ export component VolumePopup inherits Rectangle {
             }
         }
         scroll-event(e) => {
-            App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.05 : -0.05))));
+            App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.02 : -0.02))));
             accept
         }
     }
@@ -321,7 +321,7 @@ component QualityItem inherits Rectangle {
 // «Настройки звука»: качество и эквалайзер, окно оригинала 430×612.
 export component SoundSettings inherits Rectangle {
     width: 430px;
-    height: 612px;
+    height: 353px + eq-block.height;
     border-radius: 16px;
     background: Theme.background-color-primary-enabled-popover;
     border-width: 1px;
@@ -413,70 +413,82 @@ export component SoundSettings inherits Rectangle {
         }
         TouchArea {
             mouse-cursor: MouseCursor.pointer;
-            clicked => { App.eq-toggle(); }
+            clicked => {
+                root.presets-open = false;
+                App.eq-toggle();
+            }
         }
     }
 
-    EqSlider {
-        x: 36px;
-        y: 343px;
-        min-value: 0.5;
-        max-value: 1.5;
-        value: App.eq-preamp;
-        enabled: App.eq-on;
-        changed(v) => { App.eq-set-preamp(v); }
-    }
-    Text { x: 66px; y: 343px; text: "12dB"; font-size: Theme.font-size-label-xs; color: Theme.controls-color-primary-text-enabled; }
-    Text { x: 66px; y: 406px; text: "0dB"; font-size: Theme.font-size-label-xs; color: Theme.controls-color-primary-text-enabled; }
-    Text { x: 66px; y: 469px; text: "-12dB"; font-size: Theme.font-size-label-xs; color: Theme.controls-color-primary-text-enabled; }
-    Text { x: 25px; y: 495px; text: T.t("уровень"); font-size: Theme.font-size-label-xs; color: Theme.controls-color-primary-text-enabled; }
+    // Как у оригинала: выключенный эквалайзер сворачивается за 0,2 с, окно становится ниже.
+    eq-block := Rectangle {
+        y: 325px;
+        height: App.eq-on ? 259px : 0;
+        clip: true;
+        opacity: App.eq-on ? 1 : 0;
+        animate height, opacity { duration: App.motion ? 200ms : 0ms; }
 
-    for g[i] in App.eq-gains: Rectangle {
-        x: 119px + i * 29.3px;
-        y: 343px;
-        width: 13px;
-        height: 170px;
         EqSlider {
-            y: 0;
-            value: g;
+            x: 36px;
+            y: 18px;
+            min-value: 0.5;
+            max-value: 1.5;
+            value: App.eq-preamp;
             enabled: App.eq-on;
-            changed(v) => { App.eq-set-band(i, v); }
+            changed(v) => { App.eq-set-preamp(v); }
         }
-        Text {
-            y: 152px;
-            x: (13px - self.preferred-width) / 2;
-            text: i == 0 ? "60" : i == 1 ? "170" : i == 2 ? "310" : i == 3 ? "600" : i == 4 ? "1k" : i == 5 ? "3k" : i == 6 ? "6k" : i == 7 ? "12k" : i == 8 ? "14k" : "16k";
-            font-size: Theme.font-size-label-xs;
-            color: Theme.controls-color-primary-text-enabled;
-        }
-    }
+        Text { x: 66px; y: 18px; text: "12dB"; font-size: Theme.font-size-label-xs; color: Theme.controls-color-primary-text-enabled; }
+        Text { x: 66px; y: 81px; text: "0dB"; font-size: Theme.font-size-label-xs; color: Theme.controls-color-primary-text-enabled; }
+        Text { x: 66px; y: 144px; text: "-12dB"; font-size: Theme.font-size-label-xs; color: Theme.controls-color-primary-text-enabled; }
+        Text { x: 25px; y: 170px; text: T.t("уровень"); font-size: Theme.font-size-label-xs; color: Theme.controls-color-primary-text-enabled; }
 
-    Rectangle {
-        x: 25px;
-        y: 536px;
-        width: 380px;
-        height: 48px;
-        border-radius: 24px;
-        border-width: 1px;
-        border-color: App.eq-on ? (dd-ta.has-hover ? Theme.controls-color-secondary-outline-hovered-stroke : Theme.controls-color-secondary-outline-enabled-stroke) : Theme.controls-color-secondary-outline-disabled-stroke;
-        animate border-color { duration: App.motion ? 150ms : 0ms; }
-        Text {
-            x: 20px;
-            text: App.eq-presets[App.eq-preset];
-            font-size: Theme.font-size-label-m;
-            font-weight: 500;
-            color: App.eq-on ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-disabled;
+        for g[i] in App.eq-gains: Rectangle {
+            x: 119px + i * 29.3px;
+            y: 18px;
+            width: 13px;
+            height: 170px;
+            EqSlider {
+                y: 0;
+                value: g;
+                enabled: App.eq-on;
+                changed(v) => { App.eq-set-band(i, v); }
+            }
+            Text {
+                y: 152px;
+                x: (13px - self.preferred-width) / 2;
+                text: i == 0 ? "60" : i == 1 ? "170" : i == 2 ? "310" : i == 3 ? "600" : i == 4 ? "1k" : i == 5 ? "3k" : i == 6 ? "6k" : i == 7 ? "12k" : i == 8 ? "14k" : "16k";
+                font-size: Theme.font-size-label-xs;
+                color: Theme.controls-color-primary-text-enabled;
+            }
         }
-        Icon {
-            x: parent.width - 40px;
-            source: Icons.arrow-down;
-            size: 20px;
-            colorize: App.eq-on ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-disabled;
-        }
-        dd-ta := TouchArea {
-            enabled: App.eq-on;
-            mouse-cursor: MouseCursor.pointer;
-            clicked => { root.presets-open = !root.presets-open; }
+
+        Rectangle {
+            x: 25px;
+            y: 211px;
+            width: 380px;
+            height: 48px;
+            border-radius: 24px;
+            border-width: 1px;
+            border-color: App.eq-on ? (dd-ta.has-hover ? Theme.controls-color-secondary-outline-hovered-stroke : Theme.controls-color-secondary-outline-enabled-stroke) : Theme.controls-color-secondary-outline-disabled-stroke;
+            animate border-color { duration: App.motion ? 150ms : 0ms; }
+            Text {
+                x: 20px;
+                text: App.eq-presets[App.eq-preset];
+                font-size: Theme.font-size-label-m;
+                font-weight: 500;
+                color: App.eq-on ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-disabled;
+            }
+            Icon {
+                x: parent.width - 40px;
+                source: Icons.arrow-down;
+                size: 20px;
+                colorize: App.eq-on ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-disabled;
+            }
+            dd-ta := TouchArea {
+                enabled: App.eq-on;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.presets-open = !root.presets-open; }
+            }
         }
     }
 

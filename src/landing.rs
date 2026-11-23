@@ -137,7 +137,7 @@ fn uri(v: &Value, p: &str) -> Option<String> {
     v.pointer(p).and_then(|u| u.as_str()).filter(|u| !u.is_empty()).map(String::from)
 }
 
-const MONTHS: [&str; 12] = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+pub(crate) const MONTHS: [&str; 12] = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 const MONTHS_SHORT: [&str; 12] = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
 const WEEKDAYS: [&str; 7] = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 
@@ -515,22 +515,31 @@ fn web_target(link: &str) -> String {
     if link.starts_with("/webview") {
         return format!("url:{}", webview_url(link));
     }
-    if link.starts_with("http") {
-        return format!("url:{link}");
+    // Относительная ссылка — только от «/»: склейка с `.evil.com/` или `@evil.com/` увела бы
+    // на чужой хост. Остальное — как есть; схему и хост проверяет `client::browser_url`
+    // перед открытием.
+    if link.starts_with('/') {
+        return format!("url:https://music.yandex.ru{link}");
     }
-    format!("url:https://music.yandex.ru{link}")
+    format!("url:{link}")
 }
 
 /// `/webview?url=https%3A%2F%2F…` → адрес страницы.
 fn webview_url(link: &str) -> String {
-    let Some(enc) = link.split(['?', '&']).find_map(|p| p.strip_prefix("url=")) else { return format!("https://music.yandex.ru{link}") };
+    let Some(enc) = link.split(['?', '&']).find_map(|p| p.strip_prefix("url=")) else {
+        // Как в web_target: к хосту приклеиваем только путь от «/».
+        return if link.starts_with('/') { format!("https://music.yandex.ru{link}") } else { link.to_string() };
+    };
     let mut out = Vec::new();
     let b = enc.as_bytes();
+    // По байтам, не срезами строки: срез `&enc[i + 1..i + 3]` посреди многобайтного символа
+    // (`%aЖ`) паниковал, а с panic = "abort" это падение всего приложения.
+    let hex = |c: u8| (c as char).to_digit(16);
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(x) = u8::from_str_radix(&enc[i + 1..i + 3], 16) {
-                out.push(x);
+            if let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
             }
@@ -556,5 +565,22 @@ mod tests {
     fn links() {
         assert_eq!(web_target("/album?albumId=5&utm=1"), "album:5");
         assert_eq!(webview_url("/webview?url=https%3A%2F%2Fmusic.yandex.ru%2Fpromo"), "https://music.yandex.ru/promo");
+        assert_eq!(web_target("/promo"), "url:https://music.yandex.ru/promo");
+        assert_eq!(web_target(".evil.com/"), "url:.evil.com/");
+        assert_eq!(web_target("@evil.com/"), "url:@evil.com/");
+        assert_eq!(webview_url("/promo"), "https://music.yandex.ru/promo");
+        assert_eq!(webview_url(".evil.com/"), ".evil.com/");
+        assert_eq!(webview_url("https://music.yandex.ru/x"), "https://music.yandex.ru/x");
+    }
+
+    #[test]
+    fn webview_decoding() {
+        // Многобайтный символ сразу после «%» — без паники, как есть.
+        assert_eq!(webview_url("/webview?url=%aЖ"), "%aЖ");
+        assert_eq!(webview_url("/webview?url=%Ж1"), "%Ж1");
+        assert_eq!(webview_url("/webview?url=a%41"), "aA");
+        assert_eq!(webview_url("/webview?url=%+1"), "% 1");
+        assert_eq!(webview_url("/webview?url=%4"), "%4");
+        assert_eq!(webview_url("/webview?url=%D0%96"), "Ж");
     }
 }

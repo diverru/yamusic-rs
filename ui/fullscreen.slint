@@ -34,7 +34,7 @@ component QueueRow inherits Rectangle {
     animate background { duration: App.motion ? 150ms : 0ms; }
     ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
     Cover {
-        x: 0;
+        x: 8px;
         y: 8px;
         width: 40px;
         height: 40px;
@@ -51,10 +51,10 @@ component QueueRow inherits Rectangle {
         }
     }
     HorizontalLayout {
-        x: 52px;
+        x: 60px;
         y: 9px;
         height: 18px;
-        width: parent.width - 52px - 120px;
+        width: parent.width - 60px - 128px;
         spacing: 4px;
         Text {
             text: item.title;
@@ -75,9 +75,9 @@ component QueueRow inherits Rectangle {
         Rectangle { horizontal-stretch: 1; }
     }
     Text {
-        x: 52px;
+        x: 60px;
         y: 30px;
-        width: parent.width - 52px - 120px;
+        width: parent.width - 60px - 128px;
         text: item.artists;
         overflow: elide;
         font-size: Theme.font-size-label-m;
@@ -85,7 +85,7 @@ component QueueRow inherits Rectangle {
         color: #ffffff80;
     }
     if current: Icon {
-        x: parent.width - 86px;
+        x: parent.width - 92px;
         y: 18px;
         source: App.liked ? Icons.liked-small : Icons.like-small;
         size: 20px;
@@ -93,7 +93,7 @@ component QueueRow inherits Rectangle {
         TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.like(); } }
     }
     Text {
-        x: parent.width - 2px - self.width;
+        x: parent.width - 8px - self.width;
         y: 18px;
         text: item.duration;
         font-size: Theme.font-size-label-m;

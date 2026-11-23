@@ -1,9 +1,9 @@
 // Альбом, плейлист и «Мне нравится»: шапка, список треков, редактирование плейлиста.
 
 import { Theme } from "theme.slint";
-import { Icons, Icon, Cover, Shimmer, NavArrows, ExplicitMark, Field, ArtistLinks } from "widgets.slint";
+import { Icons, Icon, Cover, Shimmer, NavArrows, Field, ArtistLinks } from "widgets.slint";
 import { T, App, TrackItem } from "state.slint";
-import { TrackRow } from "rows.slint";
+import { TrackRow, AlbumTrackRow } from "rows.slint";
 
 component HeaderButton inherits Rectangle {
     in property <image> icon;
@@ -42,6 +42,9 @@ export component ListPage inherits Rectangle {
     property <bool> album: App.list-kind == "album";
     property <bool> likes: App.list-kind == "likes";
     property <bool> playlist: App.list-kind == "playlist";
+    // Все популярные треки исполнителя: шапка как у «Мне нравится», без описания.
+    property <bool> artist: App.list-kind == "artist";
+    property <bool> short-head: likes || artist;
     property <length> pad: 25px;
     property <length> text-x: pad + 204px + 28px;
     // Шапка: подпись 85, название 100, строки метаданных, кнопки.
@@ -51,8 +54,8 @@ export component ListPage inherits Rectangle {
     // В режиме правки поле названия на 8 px ниже обычного заголовка, всё ниже сдвигается на 8 px;
     // при правке описания под полем 120 px текста и кнопки «Сохранить» / «Отменить».
     property <length> edit-shift: App.list-edit == 1 ? 8px : 0px;
-    property <length> buttons-y: album ? 219px : likes ? 214px : App.list-edit == 2 ? 426px : 242px + desc-extra + edit-shift;
-    property <length> search-y: buttons-y + (likes ? 90px : 79px);
+    property <length> buttons-y: album ? 219px : short-head ? 214px : App.list-edit == 2 ? 426px : 242px + desc-extra + edit-shift;
+    property <length> search-y: buttons-y + (short-head ? 90px : 79px);
     property <length> rows-y: album ? buttons-y + 94px : search-y + 57px;
     property <length> row-x: playlist && App.list-own ? pad + 12px : pad;
     property <length> row-h: 56px;
@@ -74,6 +77,7 @@ export component ListPage inherits Rectangle {
             width: 204px;
             height: 204px;
             radius: Theme.radius-size-m;
+            round: artist;
             source: App.list-cover;
             cover-ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.open-cover("list"); } }
             if own && (cover-ta.has-hover || poster-ta.has-hover): Rectangle {
@@ -296,7 +300,7 @@ export component ListPage inherits Rectangle {
         }
         if !album: Text {
             x: text-x;
-            y: likes ? 162px : App.list-edit == 2 ? 374px : 190px + desc-extra + edit-shift;
+            y: short-head ? 162px : App.list-edit == 2 ? 374px : 190px + desc-extra + edit-shift;
             width: parent.width - text-x - pad;
             text: App.list-meta;
             overflow: elide;
@@ -315,7 +319,7 @@ export component ListPage inherits Rectangle {
             if album: HeaderButton { icon: App.list-liked ? Icons.liked-small : Icons.like-small; text: App.list-likes; clicked => { App.list-like(); } }
             if playlist: HeaderButton { icon: App.list-liked ? Icons.liked-small : Icons.like-small; text: App.list-likes; clicked => { App.list-like(); } }
             HeaderButton { icon: App.pinned ? Icons.pin-filled-small : Icons.pin-small; clicked => { App.list-pin(); } }
-            HeaderButton {
+            if !artist: HeaderButton {
                 icon: Icons.more-small;
                 clicked => { App.open-list-menu(self.absolute-position.x + self.width / 2, self.absolute-position.y + self.height); }
             }
@@ -412,85 +416,15 @@ export component ListPage inherits Rectangle {
                 like => { App.like-track(idx); }
                 remove => { App.list-remove-track(idx); }
             }
-            if album: Rectangle {
-                property <TrackItem> item: App.tracks[idx];
-                property <bool> current: idx == App.list-current;
-                border-radius: Theme.radius-size-m;
-                property <bool> hot: ta.has-hover || more-ta.has-hover;
-                background: current || hot ? Theme.controls-color-secondary-default-disabled : transparent;
-                ta := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.play-list(idx); } }
-                if hot || current: Icon {
-                    x: 0;
-                    source: current && App.playing ? Icons.pause-filled-xs : Icons.play-filled-xs;
-                    size: 28px;
-                    colorize: Theme.controls-color-primary-text-enabled;
-                }
-                if !hot && !current: Text {
-                    x: 0;
-                    width: 28px;
-                    horizontal-alignment: center;
-                    text: idx + 1;
-                    font-size: Theme.font-size-label-m;
-                    color: Theme.controls-color-primary-text-enabled;
-                }
-                HorizontalLayout {
-                    x: 36px;
-                    width: parent.width - 36px - 120px;
-                    height: 20px;
-                    spacing: 4px;
-                    Text {
-                        text: item.title;
-                        overflow: elide;
-                        horizontal-stretch: 0;
-                        vertical-alignment: center;
-                        font-size: Theme.font-size-label-m;
-                        font-weight: 500;
-                        color: current ? Theme.controls-color-primary-text-hovered : Theme.controls-color-primary-text-enabled-variant;
-                    }
-                    if item.version != "": Text {
-                        text: item.version;
-                        horizontal-stretch: 0;
-                        vertical-alignment: center;
-                        font-size: Theme.font-size-label-m;
-                        font-weight: 500;
-                        color: Theme.controls-color-primary-text-enabled;
-                    }
-                    if item.explicit: ExplicitMark { y: 1px; }
-                    Rectangle { horizontal-stretch: 1; }
-                }
-                Rectangle {
-                    x: parent.width - 95px;
-                    width: 40px;
-                    height: 40px;
-                    Icon {
-                        source: item.liked ? Icons.liked-small : Icons.like-small;
-                        size: 20px;
-                        colorize: Theme.controls-color-primary-text-enabled;
-                    }
-                    TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { App.like-track(idx); } }
-                }
-                Rectangle {
-                    x: parent.width - 40px + 8px;
-                    width: 40px;
-                    height: 40px;
-                    visible: hot;
-                    Icon {
-                        source: Icons.more-small;
-                        size: 20px;
-                        colorize: more-ta.has-hover ? Theme.controls-color-primary-text-enabled-variant : Theme.controls-color-primary-text-enabled;
-                    }
-                    more-ta := TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => { App.row-menu("list", idx, self.absolute-position.x + 20px, self.absolute-position.y + 40px); }
-                    }
-                }
-                if !hot: Text {
-                    x: parent.width - 2px - self.width;
-                    text: item.duration;
-                    font-size: Theme.font-size-label-m;
-                    font-weight: 500;
-                    color: Theme.controls-color-primary-text-enabled;
-                }
+            if album: AlbumTrackRow {
+                width: parent.width;
+                item: App.tracks[idx];
+                current: idx == App.list-current;
+                pos: idx + 1;
+                block: "list";
+                index: idx;
+                play => { App.play-list(idx); }
+                like => { App.like-track(idx); }
             }
         }
 

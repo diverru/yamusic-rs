@@ -1,6 +1,7 @@
-//! Тонкие обёртки над Win32: показать/спрятать окно, поверх всех, фокус, мониторы.
+//! Windows: тонкие обёртки над Win32 — окно, фокус, мониторы, диалоги, автозапуск, один экземпляр.
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
@@ -17,19 +18,62 @@ fn h(x: isize) -> HWND {
     x as HWND
 }
 
+/// HWND окна Slint; 0, пока winit его не создал.
+fn handle(w: &slint::Window) -> isize {
+    use slint::winit_030::{winit::raw_window_handle::{HasWindowHandle, RawWindowHandle}, WinitWindowAccessor};
+    w.with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
+/// Окно уже создано: winit делает это не сразу после `show()`.
+pub fn created(w: &slint::Window) -> bool {
+    handle(w) != 0
+}
+
+/// Один раз после создания окна: скруглённые углы, значок, HWND для второго запуска.
+pub fn prepare(w: &slint::Window) {
+    let hwnd = handle(w);
+    round_corners(hwnd);
+    let _ = std::fs::write(crate::config::dir().join("hwnd"), hwnd.to_string());
+    set_icon(hwnd);
+}
+
+pub fn raise(w: &slint::Window) {
+    let hwnd = handle(w);
+    show(hwnd);
+    force_foreground(hwnd);
+}
+
+pub fn is_shown(w: &slint::Window) -> bool {
+    let hwnd = handle(w);
+    hwnd != 0 && is_visible(hwnd)
+}
+
+pub fn is_minimized(w: &slint::Window) -> bool {
+    is_iconic(handle(w))
+}
+
+/// Масштаб монитора, на котором окно.
+pub fn scale(w: &slint::Window) -> f32 {
+    dpi_scale(handle(w))
+}
+
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-pub fn is_visible(hwnd: isize) -> bool {
+fn is_visible(hwnd: isize) -> bool {
     unsafe { IsWindowVisible(h(hwnd)) != 0 }
 }
 
-pub fn is_iconic(hwnd: isize) -> bool {
+fn is_iconic(hwnd: isize) -> bool {
     unsafe { IsIconic(h(hwnd)) != 0 }
 }
 
-pub fn show(hwnd: isize) {
+fn show(hwnd: isize) {
     unsafe {
         if IsIconic(h(hwnd)) != 0 {
             ShowWindow(h(hwnd), SW_RESTORE);
@@ -39,14 +83,14 @@ pub fn show(hwnd: isize) {
     }
 }
 
-pub fn hide(hwnd: isize) {
+pub fn hide(w: &slint::Window) {
     unsafe {
-        ShowWindow(h(hwnd), SW_HIDE);
+        ShowWindow(h(handle(w)), SW_HIDE);
     }
 }
 
 /// SetForegroundWindow с обходом ограничений Windows на кражу фокуса.
-pub fn force_foreground(hwnd: isize) {
+fn force_foreground(hwnd: isize) {
     unsafe {
         let target = h(hwnd);
         if SetForegroundWindow(target) != 0 && GetForegroundWindow() == target {
@@ -66,7 +110,7 @@ pub fn force_foreground(hwnd: isize) {
     }
 }
 
-pub fn dpi_scale(hwnd: isize) -> f32 {
+fn dpi_scale(hwnd: isize) -> f32 {
     let dpi = unsafe { GetDpiForWindow(h(hwnd)) };
     if dpi == 0 {
         1.0
@@ -88,7 +132,7 @@ pub fn app_icon(size: i32) -> HICON {
 }
 
 /// Значок окна в заголовке, на панели задач и в Alt+Tab.
-pub fn set_icon(hwnd: isize) {
+fn set_icon(hwnd: isize) {
     unsafe {
         let big = app_icon(GetSystemMetrics(SM_CXICON));
         let small = app_icon(GetSystemMetrics(SM_CXSMICON));
@@ -98,7 +142,7 @@ pub fn set_icon(hwnd: isize) {
 }
 
 /// Скруглённые углы окна на Windows 11 (на 10 просто ничего не делает).
-pub fn round_corners(hwnd: isize) {
+fn round_corners(hwnd: isize) {
     let pref = DWMWCP_ROUND;
     unsafe {
         DwmSetWindowAttribute(
@@ -111,7 +155,7 @@ pub fn round_corners(hwnd: isize) {
 }
 
 /// Системный диалог выбора картинки (JPEG, PNG). `None` — пользователь отказался.
-pub fn pick_image(owner: isize, title: &str) -> Option<String> {
+pub fn pick_image(owner: &slint::Window, title: &str) -> Option<String> {
     use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW};
     let filter: Vec<u16> = "Изображения (*.jpg, *.png)\0*.jpg;*.jpeg;*.png\0\0".encode_utf16().collect();
     let title = wide(title);
@@ -119,7 +163,7 @@ pub fn pick_image(owner: isize, title: &str) -> Option<String> {
     unsafe {
         let mut ofn: OPENFILENAMEW = std::mem::zeroed();
         ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-        ofn.hwndOwner = h(owner);
+        ofn.hwndOwner = h(handle(owner));
         ofn.lpstrFilter = filter.as_ptr();
         ofn.lpstrFile = buf.as_mut_ptr();
         ofn.nMaxFile = buf.len() as u32;
@@ -134,7 +178,7 @@ pub fn pick_image(owner: isize, title: &str) -> Option<String> {
 }
 
 /// Системный диалог выбора папки, открывается на `start`. `None` — пользователь отказался.
-pub fn pick_folder(owner: isize, title: &str, start: &str) -> Option<String> {
+pub fn pick_folder(owner: &slint::Window, title: &str, start: &str) -> Option<String> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{
         SHBrowseForFolderW, SHGetPathFromIDListW, BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
@@ -150,7 +194,7 @@ pub fn pick_folder(owner: isize, title: &str, start: &str) -> Option<String> {
     let mut buf = vec![0u16; 1024];
     unsafe {
         let mut bi: BROWSEINFOW = std::mem::zeroed();
-        bi.hwndOwner = h(owner);
+        bi.hwndOwner = h(handle(owner));
         bi.lpszTitle = title.as_ptr();
         bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
         bi.lpfn = Some(on_init);
@@ -170,12 +214,12 @@ pub fn pick_folder(owner: isize, title: &str, start: &str) -> Option<String> {
 }
 
 /// Рабочая область монитора с окном (без панели задач), в физических пикселях: лево, верх, право, низ.
-pub fn work_area(hwnd: isize) -> (i32, i32, i32, i32) {
+pub fn work_area(w: &slint::Window) -> (i32, i32, i32, i32) {
     use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
     unsafe {
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        GetMonitorInfoW(MonitorFromWindow(h(hwnd), MONITOR_DEFAULTTONEAREST), &mut mi);
+        GetMonitorInfoW(MonitorFromWindow(h(handle(w)), MONITOR_DEFAULTTONEAREST), &mut mi);
         let r = mi.rcWork;
         (r.left, r.top, r.right, r.bottom)
     }
@@ -253,6 +297,68 @@ pub fn refresh_autostart() {
     }
 }
 
-pub fn is_window(hwnd: isize) -> bool {
+fn is_window(hwnd: isize) -> bool {
     unsafe { IsWindow(h(hwnd)) != 0 }
+}
+
+/// Занять мьютекс единственного экземпляра. Если он уже чей-то — отпустить свою ссылку,
+/// чтобы мьютекс исчез вместе с тем процессом.
+pub fn claim_instance() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let name = wide(r"Local\yamusic_rs_single_instance");
+    unsafe {
+        let m = CreateMutexW(null(), 0, name.as_ptr());
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(m);
+            return false;
+        }
+        true
+    }
+}
+
+/// Второй запуск: показать окно работающего экземпляра.
+pub fn wake_existing() {
+    if crate::tray::wake_existing() {
+        return;
+    }
+    let hwnd: isize = std::fs::read_to_string(crate::config::dir().join("hwnd")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    if hwnd != 0 && is_window(hwnd) {
+        show(hwnd);
+        force_foreground(hwnd);
+    }
+}
+
+/// Перед выходом: убрать значок из трея и HWND для второго запуска.
+pub fn cleanup() {
+    crate::tray::remove();
+    let _ = std::fs::remove_file(crate::config::dir().join("hwnd"));
+}
+
+pub fn config_base() -> PathBuf {
+    PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into()))
+}
+
+pub fn music_dir() -> PathBuf {
+    PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music")
+}
+
+pub fn hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok()
+}
+
+/// Скопировать текст в буфер обмена.
+pub fn copy_text(text: &str) {
+    use std::io::Write as _;
+    use std::os::windows::process::CommandExt;
+    if let Ok(mut child) = std::process::Command::new("clip")
+        .creation_flags(0x0800_0000)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }

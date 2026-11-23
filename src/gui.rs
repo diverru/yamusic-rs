@@ -2,15 +2,17 @@
 
 slint::include_modules!();
 
+mod history_ui;
 mod landing_ui;
 
+use crate::save::{file_name_max, save_track, saved_already};
 use crate::api::{album_kind_word, Album, Api, Card, Collection, Pin, Playlist, Track};
 use crate::assets::Sprite;
 use crate::config::{log, Config};
 use crate::images::Images;
 use crate::net::{tracks_word, Data, ListData, Net};
-use crate::player::{After, Cmd, ListKind, Player, Repeat, Source, Status};
-use crate::win;
+use crate::player::{After, Cmd, ListKind, Loudness, Player, Repeat, Source, Status};
+use crate::sys;
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
@@ -208,7 +210,7 @@ impl Ctx {
         if let Status::Failed(e) = &s.status {
             // Токен отозван или истёк — обратно на экран входа.
             if self.st.borrow().net.is_none() && e.contains("токен") && !app.get_logged_out() {
-                self.st.borrow_mut().cfg.token = None;
+                self.st.borrow_mut().cfg.forget_token();
                 self.st.borrow().cfg.save();
                 self.login_start();
             } else if app.get_toast().is_empty() && !app.get_logged_out() {
@@ -328,26 +330,31 @@ impl Ctx {
                 with_ctx(|c| {
                     let Some(ui) = weak.upgrade() else { return };
                     let app = ui.global::<App>();
-                    if let Ok((name, avatar)) = about {
-                        app.set_login(name.into());
-                        if let Some(url) = avatar {
-                            let w = weak.clone();
-                            c.images.get(&url, 100, move |img| {
-                                if let Some(ui) = w.upgrade() {
-                                    ui.global::<App>().set_avatar(img.clone());
-                                }
-                            });
+                    match about {
+                        Ok((name, avatar)) => {
+                            app.set_login(name.into());
+                            if let Some(url) = avatar {
+                                let w = weak.clone();
+                                c.images.get(&url, 100, move |img| {
+                                    if let Some(ui) = w.upgrade() {
+                                        ui.global::<App>().set_avatar(img.clone());
+                                    }
+                                });
+                            }
                         }
+                        Err(e) => log(format!("профиль: {e}")),
                     }
                     match pins {
                         Ok(p) => c.set_pins(p),
                         Err(e) => log(format!("pins: {e}")),
                     }
-                    if let Ok(ids) = liked_albums {
-                        c.st.borrow_mut().liked_albums = ids.into_iter().collect();
+                    match liked_albums {
+                        Ok(ids) => c.st.borrow_mut().liked_albums = ids.into_iter().collect(),
+                        Err(e) => log(format!("понравившиеся альбомы: {e}")),
                     }
-                    if let Ok(keys) = liked_playlists {
-                        c.st.borrow_mut().liked_playlists = keys.into_iter().collect();
+                    match liked_playlists {
+                        Ok(keys) => c.st.borrow_mut().liked_playlists = keys.into_iter().collect(),
+                        Err(e) => log(format!("понравившиеся плейлисты: {e}")),
                     }
                     if let Some(on) = less_ai {
                         crate::api::LESS_AI.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -470,6 +477,7 @@ impl Ctx {
             Page::Artists => self.refresh_my_artists(),
             Page::Trends | Page::Concerts | Page::Nonmusic => self.refresh_landing(),
             Page::Chart => self.refresh_chart(),
+            Page::History => self.enter_history(),
             Page::Grid => {
                 if let Some(k) = key {
                     self.st.borrow_mut().grid_key = Some(k);
@@ -606,6 +614,7 @@ impl Ctx {
             Page::Artists => self.show_my_top(),
             Page::Trends | Page::Concerts | Page::Nonmusic => self.refresh_landing(),
             Page::Chart => self.refresh_chart(),
+            Page::History => self.refresh_history(),
             _ => {}
         }
         if self.ui().global::<App>().get_menu_open() {
@@ -818,6 +827,14 @@ impl Ctx {
                 app.set_list_meta(app.get_login());
                 app.set_list_tint(Color::from_rgb_u8(217, 217, 217));
             }
+            ListKind::Artist => {
+                app.set_list_kind("artist".into());
+                app.set_list_kind_label(crate::i18n::tr("Популярные треки").into());
+                app.set_list_meta(tracks_word(l.tracks.len() as u64).into());
+                if let Some(c) = l.artist.as_ref().and_then(|a| a.color) {
+                    app.set_list_tint(soft(c));
+                }
+            }
             ListKind::Album => {
                 let a = l.album.as_ref();
                 app.set_list_kind("album".into());
@@ -930,9 +947,10 @@ impl Ctx {
     }
 
     fn list_id(l: &ListData) -> String {
-        match (&l.playlist, &l.album) {
-            (Some(p), _) => format!("{}:{}", p.uid, p.kind),
-            (_, Some(a)) => a.id.clone(),
+        match (&l.playlist, &l.album, &l.artist) {
+            (Some(p), _, _) => format!("{}:{}", p.uid, p.kind),
+            (_, Some(a), _) => a.id.clone(),
+            (_, _, Some(a)) => a.id.clone(),
             _ => "likes".into(),
         }
     }
@@ -987,9 +1005,10 @@ impl Ctx {
             return;
         }
         let start = self.st.borrow().view.get(i).copied().unwrap_or(0);
-        let wave = match (&l.playlist, &l.album) {
-            (Some(p), _) => Source::Seed { station: p.seed(), header: "Моя волна по плейлисту".into(), title: p.title.clone() },
-            (_, Some(a)) => Source::Seed { station: format!("album:{}", a.id), header: "Моя волна по альбому".into(), title: a.title.clone() },
+        let wave = match (&l.playlist, &l.album, &l.artist) {
+            (Some(p), _, _) => Source::Seed { station: p.seed(), header: "Моя волна по плейлисту".into(), title: p.title.clone() },
+            (_, Some(a), _) => Source::Seed { station: format!("album:{}", a.id), header: "Моя волна по альбому".into(), title: a.title.clone() },
+            (_, _, Some(a)) => Source::Seed { station: format!("artist:{}", a.id), header: "Моя волна по исполнителю".into(), title: a.name.clone() },
             _ => Source::Wave,
         };
         self.player.send(Cmd::PlayList {
@@ -1025,15 +1044,9 @@ impl Ctx {
 
     fn play_wheel(self: &Rc<Self>, i: usize) {
         let Some(w) = self.st.borrow().wheel.get(i).cloned() else { return };
-        let seed = w.seeds.first().cloned().unwrap_or_default();
-        let source = if seed == crate::api::WAVE || seed.is_empty() {
-            Source::Wave
-        } else {
-            let station = match seed.split_once(':') {
-                Some(("artist-tracks", id)) => format!("artist:{id}"),
-                _ => seed,
-            };
-            Source::Seed { station, header: "Моя волна".into(), title: w.name.clone() }
+        let source = match w.station() {
+            Some(station) => Source::Seed { station, header: "Моя волна".into(), title: w.name.clone() },
+            None => Source::Wave,
         };
         self.player.send(Cmd::Wave(source));
         self.start();
@@ -1058,22 +1071,89 @@ impl Ctx {
 /// Масштаб как у оригинала: начиная с 1920 CSS-пикселей ширины корневой шрифт
 /// `0.75rem + 0.3vw`, и всё, что задано в rem, растёт вместе с ним.
 fn apply_ui_scale(ui: &AppWindow) {
+    rescale(ui, false);
+}
+
+/// `force` — после переноса на монитор с другим масштабом: размер и масштаб окна пересылаются
+/// Slint заново, даже если масштаб совпал, и окно перерисовывается целиком. Иначе после
+/// переноса могла остаться недорисованная часть окна (#16).
+fn rescale(ui: &AppWindow, force: bool) {
     let w = ui.window();
     let phys = w.size();
     if phys.width == 0 || phys.height == 0 {
         return;
     }
-    let base = std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or_else(|| win::dpi_scale(hwnd(ui)));
+    let base = std::env::var("SLINT_SCALE_FACTOR").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or_else(|| sys::scale(ui.window()));
     let css_w = phys.width as f32 / base;
     let k = if css_w >= 1920.0 { (12.0 + 0.003 * css_w) / 16.0 } else { 1.0 };
     let target = base * k;
     ui.global::<App>().set_ui_scale(k);
     ui.global::<App>().set_dpr(target);
-    if (w.scale_factor() - target).abs() < 0.001 {
+    if !force && (w.scale_factor() - target).abs() < 0.001 {
         return;
     }
     w.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: target });
     w.dispatch_event(slint::platform::WindowEvent::Resized { size: phys.to_logical(target) });
+    if force {
+        full_repaint(ui);
+    }
+}
+
+/// Перерисовать окно целиком, а не только изменившиеся места. Кадр выводится в окно через GDI,
+/// и часть окна за краем экрана при этом отсекается: если окно потом вернуть на экран, там
+/// осталась бы пустота или старый кадр (#16).
+fn full_repaint(ui: &AppWindow) {
+    ui.global::<App>().set_repaint(true);
+    let weak = ui.as_weak();
+    Timer::single_shot(Duration::from_millis(50), move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<App>().set_repaint(false);
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    static LAST_CURSOR: std::cell::Cell<slint::LogicalPosition> = const { std::cell::Cell::new(slint::LogicalPosition::new(0.0, 0.0)) };
+}
+
+/// На Linux окно двигает и тянет за край сам композитор, и отпускание кнопки до нас не доходит.
+/// Slint так и считает левую зажатой и отдаёт все клики полосе заголовка, а та снова начинает
+/// перетаскивание (#17). Отпускаем кнопку за него. Не прямо здесь: мы внутри обработки нажатия.
+fn release_after_system_drag(ui: &AppWindow) {
+    #[cfg(target_os = "linux")]
+    {
+        let weak = ui.as_weak();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                    position: LAST_CURSOR.get(),
+                    button: slint::platform::PointerEventButton::Left,
+                });
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = ui;
+}
+
+thread_local! {
+    static MOVED: Timer = Timer::default();
+}
+
+/// Окно сдвинули: перерисовать целиком, когда его перестанут двигать.
+fn after_move() {
+    MOVED.with(|t| {
+        t.start(TimerMode::SingleShot, Duration::from_millis(150), || with_ctx(|c| full_repaint(&c.ui())));
+    });
+}
+
+/// Окно перенесли на монитор с другим масштабом. Пока его тащат, Windows может прислать
+/// смену масштаба несколько раз, поэтому пересчёт ещё раз — когда всё уляжется.
+fn after_dpi_change() {
+    for ms in [0, 300] {
+        Timer::single_shot(Duration::from_millis(ms), || with_ctx(|c| rescale(&c.ui(), true)));
+    }
 }
 
 /// Чат поддержки, как `createSupportChatUrl` оригинала.
@@ -1081,13 +1161,78 @@ const SUPPORT_CHAT: &str =
     "https://yandex.ru/chat?context=%7B%22entrypoint%22%3A%22web_desktop%22%7D#/user/ee219503-b69b-9484-405b-6877a510e13c";
 
 fn quit() {
+    #[cfg(windows)]
     crate::tray::remove();
     let _ = slint::quit_event_loop();
 }
 
+/// Обычное окно перед мини-плеером, место плашки и последний размер неразвёрнутого окна.
+#[derive(Default)]
+struct Places {
+    normal: Cell<Option<(Option<slint::PhysicalPosition>, slint::PhysicalSize, bool)>>,
+    mini: Cell<Option<slint::PhysicalPosition>>,
+    restored: Cell<Option<slint::PhysicalSize>>,
+}
+
+/// Место окна на экране; Wayland его приложению не сообщает.
+fn window_pos(w: &slint::Window) -> Option<slint::PhysicalPosition> {
+    w.with_winit_window(|ww| ww.outer_position().ok()).flatten().map(|p| slint::PhysicalPosition::new(p.x, p.y))
+}
+
+fn save_places(ui: &AppWindow, places: &Places) {
+    let w = ui.window();
+    if !sys::created(w) || w.is_minimized() {
+        return;
+    }
+    let mini = ui.global::<App>().get_mini();
+    if mini {
+        places.mini.set(window_pos(w).or(places.mini.get()));
+    }
+    let normal = if mini { places.normal.get() } else { Some((window_pos(w), w.size(), w.is_maximized())) };
+    with_ctx(|c| {
+        let mut st = c.st.borrow_mut();
+        let cfg = &mut st.cfg;
+        if let Some((pos, size, max)) = normal {
+            if let Some(p) = pos {
+                cfg.window_pos = Some([p.x, p.y]);
+            }
+            if let Some(s) = if max { places.restored.get() } else { Some(size) } {
+                cfg.window_size = Some([s.width, s.height]);
+            }
+            cfg.window_maximized = max;
+        }
+        cfg.mini_pos = places.mini.get().map(|p| [p.x, p.y]);
+        cfg.save();
+    });
+}
+
+/// Вернуть окно на экран, если его монитор с прошлого раза отключили.
+fn keep_on_screen(w: &slint::Window) {
+    let fix = w
+        .with_winit_window(|ww| {
+            let p = ww.outer_position().ok()?;
+            let seen = ww.available_monitors().any(|m| {
+                let (mp, ms) = (m.position(), m.size());
+                (mp.x..mp.x + ms.width as i32).contains(&(p.x + 100)) && (mp.y..mp.y + ms.height as i32).contains(&(p.y + 20))
+            });
+            if seen {
+                return None;
+            }
+            let m = ww.primary_monitor().or_else(|| ww.available_monitors().next())?;
+            let (mp, ms, s) = (m.position(), m.size(), ww.outer_size());
+            let x = mp.x + (ms.width as i32 - s.width as i32).max(0) / 2;
+            let y = mp.y + (ms.height as i32 - s.height as i32).max(0) / 2;
+            Some(slint::PhysicalPosition::new(x, y))
+        })
+        .flatten();
+    if let Some(p) = fix {
+        w.set_position(p);
+    }
+}
+
 /// Показать окно: при запуске в трей оно ещё не создано, после закрытия в трей — спрятано.
 fn reveal(ui: &AppWindow) {
-    let first = hwnd(ui) == 0;
+    let first = !sys::created(ui.window());
     if let Err(e) = ui.show() {
         log(format!("окно не показалось: {e}"));
         return;
@@ -1104,11 +1249,10 @@ fn apply_mode(ui: &AppWindow, lite: bool) {
 }
 
 /// Окно winit создаётся не сразу после `show()` (до запуска цикла событий и с OpenGL),
-/// поэтому масштаб и прочее применяются, когда у окна появится HWND.
+/// поэтому масштаб и прочее применяются, когда окно появится.
 fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     let Some(ui) = weak.upgrade() else { return };
-    let h = hwnd(&ui);
-    if h == 0 {
+    if !sys::created(ui.window()) {
         if tries < 100 {
             Timer::single_shot(Duration::from_millis(20), move || finish_reveal(weak, first, tries + 1));
         }
@@ -1116,22 +1260,10 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     }
     if first {
         apply_ui_scale(&ui);
-        win::round_corners(h);
-        let _ = std::fs::write(crate::config::dir().join("hwnd"), h.to_string());
-        win::set_icon(h);
+        sys::prepare(ui.window());
+        keep_on_screen(ui.window());
     }
-    win::show(h);
-    win::force_foreground(h);
-}
-
-fn hwnd(ui: &AppWindow) -> isize {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    ui.window()
-        .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
-            Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
-            _ => 0,
-        })
-        .unwrap_or(0)
+    sys::raise(ui.window());
 }
 
 fn notifier() -> Arc<dyn Fn() + Send + Sync> {
@@ -1162,56 +1294,18 @@ fn load_assets() -> Option<Sprite> {
     Sprite::load(&mut src)
 }
 
-thread_local! {
-    /// Найденный новый релиз — для кнопки «Обновить».
-    static UPDATE: RefCell<Option<crate::update::Release>> = const { RefCell::new(None) };
-}
-
-/// Проверка обновлений в фоне (первая — через 10 с после запуска) и кнопка «Обновить» в тосте.
-fn start_updates(ui: &AppWindow) {
+/// Сеть до music.yandex.ru бывает медленной, и при запуске шрифты с иконками не успевают
+/// скачаться. Тогда пробуем ещё раз в 20 с и подставляем их без перезапуска (#48).
+fn retry_assets(ui: &AppWindow) {
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
-        loop {
-            match crate::update::check() {
-                Ok(Some(r)) => {
-                    let weak = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.global::<App>().set_update_version(r.version.clone().into());
-                            UPDATE.with(|u| *u.borrow_mut() = Some(r));
-                        }
-                    });
-                }
-                Ok(None) => {}
-                Err(e) => log(format!("обновления: {e}")),
-            }
-            std::thread::sleep(crate::update::POLL);
-        }
-    });
-    ui.global::<App>().on_update_install(|| {
-        let Some(r) = UPDATE.with(|u| u.borrow().clone()) else { return };
-        // В релизе нет exe — обновить можно только руками, ведём на страницу.
-        if r.exe.is_none() {
-            win::open_url(&r.page);
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_secs(20));
+            let Some(sprite) = load_assets() else { continue };
+            log("шрифты и иконки догрузились");
+            let _ = weak.upgrade_in_event_loop(move |ui| set_icons(&ui, &sprite));
             return;
         }
-        with_ctx(|c| c.ui().global::<App>().set_update_busy(true));
-        std::thread::spawn(move || {
-            let res = crate::update::install(&r).and_then(|exe| crate::update::relaunch(&exe));
-            let _ = slint::invoke_from_event_loop(move || match res {
-                // Новая версия ждёт, пока мы закроемся.
-                Ok(()) => quit(),
-                Err(e) => {
-                    log(format!("обновление: {e}"));
-                    with_ctx(|c| {
-                        c.ui().global::<App>().set_update_busy(false);
-                        c.toast(format!("Не удалось обновить: {e}"));
-                    });
-                    win::open_url(&r.page);
-                }
-            });
-        });
     });
 }
 
@@ -1378,25 +1472,29 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let dark = match cfg.theme.as_str() {
         "dark" => true,
         "light" => false,
-        _ => !win::system_light_theme(),
+        _ => !sys::system_light_theme(),
     };
     let assets = load_assets();
     if assets.is_none() {
-        log("шрифты и иконки недоступны — нет ни оригинала, ни сети");
+        log("шрифты и иконки недоступны — нет ни оригинала, ни сети, пробуем ещё в фоне");
     }
 
     let ui = AppWindow::new()?;
     ui.global::<Theme>().set_dark(true);
     let lite = cfg.mode == "lite";
     apply_mode(&ui, lite);
-    if let Some(sprite) = &assets {
-        set_icons(&ui, sprite);
+    match &assets {
+        Some(sprite) => set_icons(&ui, sprite),
+        None => retry_assets(&ui),
     }
     load_id_icons(&ui);
-    start_updates(&ui);
 
+    crate::api::ALLOW_EXPLICIT.store(cfg.allow_explicit, Ordering::Relaxed);
     let player = Player::spawn(notifier());
     player.send(Cmd::Volume(cfg.volume));
+    if cfg.log_volume {
+        player.send(Cmd::Loudness(Loudness::Decibels));
+    }
     if let Some(t) = cfg.token.clone() {
         player.send(Cmd::Login(t));
     }
@@ -1417,8 +1515,31 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         crate::discord::DiscordCfg { enabled: cfg.discord_enabled, app_id: cfg.discord_app_id.clone() },
     );
     app.set_discord_on(cfg.discord_enabled);
-    app.set_autostart(win::autostart_enabled());
+    app.set_discord_supported(!cfg!(target_os = "macos"));
+    app.set_gpu(cfg.gpu);
+    app.set_autostart(sys::autostart_enabled());
+    app.set_allow_explicit(cfg.allow_explicit);
+    app.set_linux(cfg!(target_os = "linux"));
+    app.set_macos(cfg!(target_os = "macos"));
+    app.set_translations(crate::i18n::available());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
+    app.set_download_flac(cfg.download_flac);
+    app.set_log_volume(cfg.log_volume);
+    app.set_hidden_blocks(landing_ui::hidden_titles(&cfg).into());
+    let places = Rc::new(Places::default());
+    places.mini.set(cfg.mini_pos.map(|[x, y]| slint::PhysicalPosition::new(x, y)));
+    if let Some([w, h]) = cfg.window_size {
+        let size = slint::PhysicalSize::new(w, h);
+        places.restored.set(Some(size));
+        ui.window().set_size(size);
+    }
+    if let Some([x, y]) = cfg.window_pos {
+        ui.window().set_position(slint::PhysicalPosition::new(x, y));
+    }
+    if cfg.window_maximized {
+        ui.window().set_maximized(true);
+        app.set_maximized(true);
+    }
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         lite: Cell::new(lite),
@@ -1491,9 +1612,6 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let p = player.clone();
     app.on_play_pause(move || {
         let started = CTX.with(|c| c.borrow().as_ref().map(|c| c.st.borrow().started)).unwrap_or(true);
-        if p.state().track.is_none() {
-            p.send(Cmd::Wave(Source::Wave));
-        }
         if started {
             p.send(Cmd::PlayPause);
         } else {
@@ -1643,6 +1761,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
 
     register_extra(&app);
     landing_ui::register(&app);
+    history_ui::register(&app);
     landing_ui::load_concert_assets(&app);
 
     let weak = ui.as_weak();
@@ -1651,41 +1770,71 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().with_winit_window(|w| {
                 let _ = w.drag_window();
             });
+            release_after_system_drag(&ui);
         }
     });
     let weak = ui.as_weak();
-    // Место и размер обычного окна до мини-плеера и последнее место самой плашки.
-    let normal = std::cell::Cell::new(None::<(slint::PhysicalPosition, slint::PhysicalSize, bool)>);
-    let mini_pos = std::cell::Cell::new(None::<slint::PhysicalPosition>);
+    let pl = places.clone();
     app.on_toggle_mini(move || {
         use winit::dpi::LogicalSize;
         let Some(ui) = weak.upgrade() else { return };
         let app = ui.global::<App>();
         let w = ui.window();
         if !app.get_mini() {
-            normal.set(Some((w.position(), w.size(), w.is_maximized())));
+            let was_max = w.is_maximized();
+            pl.normal.set(Some((window_pos(w), w.size(), was_max)));
             app.set_mini(true);
             app.set_maximized(false);
-            w.set_maximized(false);
+            // KWin в ответ на set_maximized(false) присылает текущий размер и перебивает размер плашки.
+            if was_max {
+                w.set_maximized(false);
+            }
             // Slint обновит ограничения размера только на следующем кадре, а Windows без этого не даст ужать окно.
             w.with_winit_window(|ww| {
-                ww.set_maximized(false);
+                if was_max {
+                    ww.set_maximized(false);
+                }
                 ww.set_min_inner_size(Some(LogicalSize::new(320.0, 88.0)));
             });
             w.set_size(slint::LogicalSize::new(400.0, 88.0));
+            // Композитор на Linux возвращает размер развёрнутого окна уже после нашего запроса.
+            #[cfg(target_os = "linux")]
+            {
+                let weak = weak.clone();
+                Timer::single_shot(Duration::from_millis(150), move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let w = ui.window();
+                    if ui.global::<App>().get_mini() && w.size().height as f32 > 120.0 * w.scale_factor() {
+                        w.set_size(slint::LogicalSize::new(400.0, 88.0));
+                    }
+                });
+            }
             let k = w.scale_factor();
             let (mw, mh, gap) = ((400.0 * k) as i32, (88.0 * k) as i32, (16.0 * k) as i32);
-            let (l, t, r, b) = win::work_area(hwnd(&ui));
-            let p = mini_pos.get().unwrap_or(slint::PhysicalPosition::new(r - mw - gap, b - mh - gap));
+            let (l, t, r, b) = sys::work_area(w);
+            let p = pl.mini.get().unwrap_or(slint::PhysicalPosition::new(r - mw - gap, b - mh - gap));
             w.set_position(slint::PhysicalPosition::new(p.x.min(r - mw).max(l), p.y.min(b - mh).max(t)));
         } else {
-            mini_pos.set(Some(w.position()));
+            pl.mini.set(window_pos(w).or(pl.mini.get()));
             app.set_mini(false);
             w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
-            match normal.take() {
+            match pl.normal.take() {
                 Some((pos, size, max)) => {
-                    w.set_size(size);
-                    w.set_position(pos);
+                    w.set_size(if max { pl.restored.get().unwrap_or(size) } else { size });
+                    if let Some(pos) = pos {
+                        w.set_position(pos);
+                        // Оконный менеджер X11 может сдвинуть окно, пока применяет новый размер.
+                        #[cfg(target_os = "linux")]
+                        {
+                            let weak = weak.clone();
+                            Timer::single_shot(Duration::from_millis(150), move || {
+                                let Some(ui) = weak.upgrade() else { return };
+                                if !ui.global::<App>().get_mini() && window_pos(ui.window()) != Some(pos) {
+                                    ui.window().set_position(pos);
+                                }
+                            });
+                        }
+                    }
                     if max {
                         w.set_maximized(true);
                         app.set_maximized(true);
@@ -1703,6 +1852,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().with_winit_window(|w| {
                 let _ = w.drag_resize_window(d);
             });
+            release_after_system_drag(&ui);
         }
     });
     let weak = ui.as_weak();
@@ -1719,72 +1869,62 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().set_minimized(true);
         }
     });
-    // Как у оригинала на Windows: пока играет трек, окно прячется в трей, иначе приложение закрывается.
-    let weak = ui.as_weak();
-    let p = player.clone();
-    app.on_close(move || {
-        if p.state().playing {
-            if let Some(ui) = weak.upgrade() {
-                let h = hwnd(&ui);
-                if h != 0 {
-                    win::hide(h);
-                    win::trim_memory();
-                    return;
-                }
-            }
-        }
-        quit();
-    });
-
-    let weak = ui.as_weak();
-    let p = player.clone();
-    crate::tray::install(
-        move |e| {
-            use crate::tray::Event;
-            let Some(ui) = weak.upgrade() else { return };
-            match e {
-                Event::Toggle => {
-                    let h = hwnd(&ui);
-                    if h == 0 || !win::is_visible(h) {
-                        reveal(&ui);
-                    } else if win::is_iconic(h) {
-                        win::show(h);
-                        win::force_foreground(h);
-                    } else {
-                        ui.window().set_minimized(true);
+    // Как у оригинала на Windows: пока играет трек, окно прячется в трей (на macOS — в меню-бар),
+    // иначе приложение закрывается. На Linux трея пока нет, там закрытие всегда выход.
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let weak = ui.as_weak();
+        let p = player.clone();
+        app.on_close(move || {
+            if p.state().playing {
+                if let Some(ui) = weak.upgrade() {
+                    if sys::created(ui.window()) {
+                        sys::hide(ui.window());
+                        sys::trim_memory();
+                        return;
                     }
                 }
-                Event::Show => reveal(&ui),
-                Event::PlayPause => ui.global::<App>().invoke_play_pause(),
-                Event::Prev => p.send(Cmd::Prev),
-                Event::Next => p.send(Cmd::Next),
-                Event::Updates => win::open_url(concat!(env!("CARGO_PKG_REPOSITORY"), "/releases")),
-                Event::Terms => win::open_url("https://yandex.ru/legal/music_mobile_agreement/"),
-                Event::Recommendations => win::open_url("https://music.yandex.ru/legal/recommendations/ru/#music"),
-                Event::Support => win::open_url(SUPPORT_CHAT),
-                Event::Quit => quit(),
             }
-        },
-        {
-            let weak = ui.as_weak();
-            let p = player.clone();
-            move || {
-                let h = weak.upgrade().map(|ui| hwnd(&ui)).unwrap_or(0);
-                let s = p.state();
-                crate::tray::MenuState {
-                    minimized: h == 0 || !win::is_visible(h) || win::is_iconic(h),
-                    playing: s.playing,
-                    can_prev: s.track.is_some(),
-                    can_next: s.track.is_some(),
-                }
-            }
-        },
-    );
+            quit();
+        });
+        install_tray(&ui, &player);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        app.on_close(quit);
+        let weak = ui.as_weak();
+        sys::on_wake(move || {
+            let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
+        });
+        install_mpris(&ui, &player);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let weak = ui.as_weak();
+        sys::on_wake(move || {
+            let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
+        });
+        install_media(&ui, &player);
+    }
+    // Alt+F4 и закрытие из панели задач: Slint сам только прячет окно, а процесс остаётся жить.
+    let weak = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.global::<App>().invoke_close();
+        }
+        slint::CloseRequestResponse::KeepWindowShown
+    });
 
-    ui.window().on_winit_window_event(|_, ev| {
+    ui.window().on_winit_window_event(|_w, ev| {
         use slint::winit_030::EventResult;
         use winit::event::{ElementState, MouseButton, WindowEvent};
         match ev {
+            #[cfg(target_os = "linux")]
+            WindowEvent::CursorMoved { position, .. } => {
+                let p = position.to_logical::<f32>(_w.scale_factor() as f64);
+                LAST_CURSOR.set(slint::LogicalPosition::new(p.x, p.y));
+                EventResult::Propagate
+            }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Back, .. } => {
                 with_ctx(|c| c.go_back());
                 EventResult::PreventDefault
@@ -1792,6 +1932,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Forward, .. } => {
                 with_ctx(|c| c.go_forward());
                 EventResult::PreventDefault
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                after_dpi_change();
+                EventResult::Propagate
+            }
+            WindowEvent::Moved(_) => {
+                after_move();
+                EventResult::Propagate
             }
             _ => EventResult::Propagate,
         }
@@ -1811,12 +1959,38 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         })
     });
 
+    // «Как в системе» следит за темой Windows и macOS и на ходу. На Linux её отдаёт портал через
+    // gdbus, запускать его каждые пару секунд не стоит.
+    #[cfg(any(windows, target_os = "macos"))]
+    let theme_tick = Timer::default();
+    #[cfg(any(windows, target_os = "macos"))]
+    theme_tick.start(TimerMode::Repeated, Duration::from_secs(2), || {
+        with_ctx(|c| {
+            if c.st.borrow().cfg.theme != "system" {
+                return;
+            }
+            let dark = !sys::system_light_theme();
+            if c.st.borrow().dark == dark {
+                return;
+            }
+            c.st.borrow_mut().dark = dark;
+            let ui = c.ui();
+            ui.global::<Theme>().set_dark(ui.global::<App>().get_page() == Page::Wave || dark);
+        })
+    });
+
     let weak = ui.as_weak();
+    let pl = places.clone();
     app.on_window_resized(move || {
         let weak = weak.clone();
+        let pl = pl.clone();
         Timer::single_shot(Duration::ZERO, move || {
             if let Some(ui) = weak.upgrade() {
                 apply_ui_scale(&ui);
+                let w = ui.window();
+                if !w.is_maximized() && !w.is_minimized() && !ui.global::<App>().get_mini() {
+                    pl.restored.set(Some(w.size()));
+                }
             }
         });
     });
@@ -1824,12 +1998,125 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     if !start_hidden {
         reveal(&ui);
     }
+    // Выход сохраняет окно и убирает за собой; на macOS его же зовёт Cmd+Q, мимо цикла событий.
+    let finish = Rc::new({
+        let (weak, places, done) = (ui.as_weak(), places.clone(), Cell::new(false));
+        move || {
+            if done.replace(true) {
+                return;
+            }
+            if let Some(ui) = weak.upgrade() {
+                save_places(&ui, &places);
+            }
+            sys::cleanup();
+        }
+    });
+    #[cfg(target_os = "macos")]
+    {
+        let finish = finish.clone();
+        sys::on_terminate(move || finish());
+    }
     slint::run_event_loop_until_quit()?;
-    crate::tray::remove();
+    finish();
     // Фоновые потоки (аудио, сеть, обложки) не ждём: иначе процесс может остаться
     // без окна и держать мьютекс, и следующий запуск молча закроется.
-    let _ = std::fs::remove_file(crate::config::dir().join("hwnd"));
     std::process::exit(0)
+}
+
+/// Медиаклавиши и плеер в панели Linux. Команды выполняются так же, как кнопки в окне.
+#[cfg(target_os = "linux")]
+fn install_mpris(ui: &AppWindow, player: &Player) {
+    let weak = ui.as_weak();
+    let p = player.clone();
+    crate::mpris::spawn(player.clone(), move |e| {
+        let p = p.clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            use crate::mpris::Event;
+            let app = ui.global::<App>();
+            let s = p.state();
+            match e {
+                Event::PlayPause => app.invoke_play_pause(),
+                Event::Play if !s.playing => app.invoke_play_pause(),
+                Event::Pause if s.playing => app.invoke_play_pause(),
+                Event::Play | Event::Pause => {}
+                Event::Next => p.send(Cmd::Next),
+                Event::Prev => p.send(Cmd::Prev),
+                Event::Seek(sec) => p.send(Cmd::Seek(sec)),
+                Event::SeekBy(sec) => p.send(Cmd::Seek((s.position + sec).max(0.0))),
+                Event::Volume(v) => app.invoke_set_volume(v),
+                Event::Raise => reveal(&ui),
+                Event::Quit => quit(),
+            }
+        });
+    });
+}
+
+/// Медиаклавиши и «Сейчас играет» на macOS. Команды выполняются так же, как кнопки в окне.
+#[cfg(target_os = "macos")]
+fn install_media(ui: &AppWindow, player: &Player) {
+    let weak = ui.as_weak();
+    let p = player.clone();
+    crate::now_playing::spawn(player.clone(), move |e| {
+        let p = p.clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            use crate::now_playing::Event;
+            let s = p.state();
+            match e {
+                Event::PlayPause => ui.global::<App>().invoke_play_pause(),
+                Event::Play if !s.playing => ui.global::<App>().invoke_play_pause(),
+                Event::Pause if s.playing => ui.global::<App>().invoke_play_pause(),
+                Event::Play | Event::Pause => {}
+                Event::Next => p.send(Cmd::Next),
+                Event::Prev => p.send(Cmd::Prev),
+                Event::Seek(sec) => p.send(Cmd::Seek(sec)),
+            }
+        });
+    });
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn install_tray(ui: &AppWindow, player: &Player) {
+    let weak = ui.as_weak();
+    let p = player.clone();
+    crate::tray::install(
+        move |e| {
+            use crate::tray::Event;
+            let Some(ui) = weak.upgrade() else { return };
+            match e {
+                Event::Toggle => {
+                    if !sys::is_shown(ui.window()) {
+                        reveal(&ui);
+                    } else if sys::is_minimized(ui.window()) {
+                        sys::raise(ui.window());
+                    } else {
+                        ui.window().set_minimized(true);
+                    }
+                }
+                Event::Show => reveal(&ui),
+                Event::PlayPause => ui.global::<App>().invoke_play_pause(),
+                Event::Prev => p.send(Cmd::Prev),
+                Event::Next => p.send(Cmd::Next),
+                Event::Terms => sys::open_url("https://yandex.ru/legal/music_mobile_agreement/"),
+                Event::Recommendations => sys::open_url("https://music.yandex.ru/legal/recommendations/ru/#music"),
+                Event::Support => sys::open_url(SUPPORT_CHAT),
+                Event::Quit => quit(),
+            }
+        },
+        {
+            let weak = ui.as_weak();
+            let p = player.clone();
+            move || {
+                let minimized = weak.upgrade().is_none_or(|ui| !sys::is_shown(ui.window()) || sys::is_minimized(ui.window()));
+                let s = p.state();
+                crate::tray::MenuState {
+                    minimized,
+                    playing: s.playing,
+                    can_prev: s.track.is_some(),
+                    can_next: s.track.is_some(),
+                }
+            }
+        },
+    );
 }
 
 // ---------- цвета волны и плеера ----------
@@ -1959,22 +2246,6 @@ fn card_from_playlist(p: &Playlist) -> Card {
     }
 }
 
-/// Скопировать текст в буфер обмена Windows.
-fn copy_text(text: &str) {
-    use std::io::Write as _;
-    use std::os::windows::process::CommandExt;
-    if let Ok(mut child) = std::process::Command::new("clip")
-        .creation_flags(0x0800_0000)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
-    }
-}
-
 fn track_link(t: &Track) -> String {
     match &t.album_id {
         Some(a) => format!("https://music.yandex.ru/album/{a}/track/{}", t.id),
@@ -1989,29 +2260,6 @@ fn iframe_code(path: &str, w: u32, h: u32, link: &str) -> String {
     )
 }
 
-/// Имя файла или папки, которое Windows точно примет: без запрещённых и управляющих
-/// символов, без точки и пробела в конце, не зарезервированное (CON, NUL, COM1…), не длиннее `max`.
-fn file_name_max(s: &str, max: usize) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| if "\\/:*?\"<>|".contains(c) || (c as u32) < 0x20 { '_' } else { c })
-        .collect();
-    if out.chars().count() > max {
-        out = out.chars().take(max).collect();
-    }
-    let out = out.trim_end_matches(['.', ' ']).trim_start().to_string();
-    if out.is_empty() {
-        return "_".into();
-    }
-    let stem = out.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
-    if reserved {
-        format!("_{out}")
-    } else {
-        out
-    }
-}
 
 fn file_name(s: &str) -> String {
     file_name_max(s, 100)
@@ -2037,7 +2285,7 @@ impl Ctx {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = w.upgrade() {
                         let app = ui.global::<App>();
-                        let chars: Vec<SharedString> = code.chars().map(|c| SharedString::from(c.to_uppercase().to_string())).collect();
+                        let chars: Vec<SharedString> = code.chars().map(|c| SharedString::from(c.to_string())).collect();
                         app.set_login_code_chars(ModelRc::from(Rc::new(VecModel::from(chars))));
                         app.set_login_code(code.into());
                         app.set_login_error(err.into());
@@ -2078,7 +2326,7 @@ impl Ctx {
                 st.cfg.refresh_token = t.refresh;
             }
             st.cfg.token_expires = t.expires_in.map(|s| crate::config::now_secs() + s);
-            st.cfg.save();
+            st.cfg.save_explicit();
         }
         let ui = self.ui();
         let app = ui.global::<App>();
@@ -2119,8 +2367,13 @@ impl Ctx {
         self.player.send(Cmd::Logout);
         {
             let mut st = self.st.borrow_mut();
-            st.cfg.token = None;
-            st.cfg.refresh_token = None;
+            if let Some(token) = st.cfg.token.clone() {
+                std::thread::spawn(move || match crate::auth::revoke(&token) {
+                    Ok(()) => log("выход: токен отозван"),
+                    Err(e) => log(format!("выход: токен не отозван: {e}")),
+                });
+            }
+            st.cfg.forget_account();
             st.cfg.token_expires = None;
             st.cfg.save();
             st.net = None;
@@ -2196,6 +2449,12 @@ impl Ctx {
     fn open_card(self: &Rc<Self>, block: &str, i: usize) {
         match block {
             "chart" => return self.navigate(Page::Chart, None, true),
+            "artist-tracks" => {
+                if let Some((id, _)) = self.current_artist() {
+                    self.navigate(Page::List, Some(format!("artist-tracks:{id}")), true);
+                }
+                return;
+            }
             "artist-more" => {
                 let (x, y) = (self.ui().window().size().width as f32 / self.ui().window().scale_factor() / 2.0, 300.0);
                 return self.open_artist_menu(x, y);
@@ -2464,7 +2723,7 @@ impl Ctx {
             let dark = match mode {
                 "dark" => true,
                 "light" => false,
-                _ => !win::system_light_theme(),
+                _ => !sys::system_light_theme(),
             };
             app.set_theme_mode(mode.into());
             {
@@ -2476,11 +2735,20 @@ impl Ctx {
             ui.global::<Theme>().set_dark(app.get_page() == Page::Wave || dark);
             return;
         }
+        if id == "explicit" {
+            let allow = !app.get_allow_explicit();
+            app.set_allow_explicit(allow);
+            self.player.send(Cmd::AllowExplicit(allow));
+            let mut st = self.st.borrow_mut();
+            st.cfg.allow_explicit = allow;
+            st.cfg.save();
+            return;
+        }
         app.set_account_open(false);
         match id {
-            "account" => win::open_url("https://id.yandex.ru"),
+            "account" => sys::open_url("https://id.yandex.ru"),
             "settings" => self.navigate(Page::Settings, None, true),
-            "support" => win::open_url(SUPPORT_CHAT),
+            "support" => sys::open_url(SUPPORT_CHAT),
             _ => {}
         }
     }
@@ -2491,7 +2759,7 @@ impl Ctx {
         match id {
             "clear" => {
                 self.images.clear();
-                win::release_memory();
+                sys::release_memory();
                 self.toast("Память очищена");
             }
             "mode:smooth" | "mode:lite" => {
@@ -2500,7 +2768,7 @@ impl Ctx {
                 self.lite.set(lite);
                 self.images.set_lite(lite);
                 if lite {
-                    win::release_memory();
+                    sys::release_memory();
                 }
                 let mut st = self.st.borrow_mut();
                 st.cfg.mode = if lite { "lite" } else { "smooth" }.to_string();
@@ -2519,13 +2787,37 @@ impl Ctx {
             }
             "download-dir" => {
                 let cur = music_dir(&self.st.borrow().cfg).display().to_string();
-                let Some(dir) = win::pick_folder(hwnd(&ui), &crate::i18n::tr("Папка для скачивания"), &cur) else { return };
+                let Some(dir) = sys::pick_folder(ui.window(), &crate::i18n::tr("Папка для скачивания"), &cur) else { return };
                 app.set_download_dir(dir.clone().into());
                 let mut st = self.st.borrow_mut();
                 st.cfg.download_dir = dir;
                 st.cfg.save();
             }
-            "about" => win::open_url(env!("CARGO_PKG_REPOSITORY")),
+            "log-volume" => {
+                let on = !app.get_log_volume();
+                app.set_log_volume(on);
+                self.player.send(Cmd::Loudness(if on { Loudness::Decibels } else { Loudness::Square }));
+                let mut st = self.st.borrow_mut();
+                st.cfg.log_volume = on;
+                st.cfg.save();
+            }
+            "download-flac" => {
+                let on = !app.get_download_flac();
+                app.set_download_flac(on);
+                let mut st = self.st.borrow_mut();
+                st.cfg.download_flac = on;
+                st.cfg.save();
+            }
+            "hidden-blocks" => {
+                {
+                    let mut st = self.st.borrow_mut();
+                    st.cfg.hidden_blocks.clear();
+                    st.cfg.save();
+                }
+                app.set_hidden_blocks(SharedString::new());
+                self.toast("Скрытые блоки снова на главной");
+            }
+            "about" => sys::open_url(env!("CARGO_PKG_REPOSITORY")),
             "discord" => {
                 let on = !app.get_discord_on();
                 app.set_discord_on(on);
@@ -2534,9 +2826,19 @@ impl Ctx {
                 st.cfg.discord_enabled = on;
                 st.cfg.save();
             }
+            "gpu" => {
+                let on = !app.get_gpu();
+                app.set_gpu(on);
+                {
+                    let mut st = self.st.borrow_mut();
+                    st.cfg.gpu = on;
+                    st.cfg.save();
+                }
+                self.toast(if on { "GPU-ускорение включится после перезапуска" } else { "GPU-ускорение выключится после перезапуска" });
+            }
             "autostart" => {
                 let on = !app.get_autostart();
-                if win::set_autostart(on) {
+                if sys::set_autostart(on) {
                     app.set_autostart(on);
                 } else {
                     self.toast("Не удалось изменить автозапуск");
@@ -2578,6 +2880,10 @@ impl Ctx {
         }
         if !l.tracks.is_empty() {
             items.push(self.menu_entry("list-playlist", "Добавить в плейлист", icons.get_m_add_playlist(), true));
+            // У «Мне нравится» скачивание вынесено кнопкой в шапку.
+            if !likes {
+                items.push(self.menu_entry("list-download", "Скачать", icons.get_m_download(), false));
+            }
         }
         items.push(self.menu_entry("list-share", "Поделиться", icons.get_m_share(), true));
         if app.get_list_own() {
@@ -2599,7 +2905,11 @@ impl Ctx {
         let st = self.st.borrow();
         match st.list_key.as_deref()? {
             "likes" => Some(format!("playlist:{}:3", st.uid)),
-            k => Some(k.to_string()),
+            k => Some(
+                k.strip_prefix("artist-tracks:")
+                    .or_else(|| k.strip_prefix("familiar:"))
+                    .map_or_else(|| k.to_string(), |id| format!("artist:{id}")),
+            ),
         }
     }
 
@@ -2688,8 +2998,8 @@ impl Ctx {
     fn list_change_cover(self: &Rc<Self>) {
         let Some((uid, kind, _)) = self.own_playlist() else { return };
         let Some(net) = self.st.borrow().net.clone() else { return };
-        let owner = hwnd(&self.ui());
-        let Some(path) = win::pick_image(owner, &crate::i18n::tr("Изменить обложку")) else { return };
+        let ui = self.ui();
+        let Some(path) = sys::pick_image(ui.window(), &crate::i18n::tr("Изменить обложку")) else { return };
         std::thread::spawn(move || {
             let res = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| {
                 // Ограничение оригинала: файл до 20 МБ.
@@ -2717,7 +3027,7 @@ impl Ctx {
             return;
         };
         std::thread::spawn(move || {
-            match net.api.remove_from_playlist(&uid, &kind, at, &t) {
+            match net.api.remove_from_playlist(&uid, &kind, &t) {
                 Ok(()) => net.say(format!("Трек «{}» удален из плейлиста «{title}»", t.title)),
                 Err(e) => net.say(format!("{}: {e}", crate::i18n::tr("Не удалось удалить трек из плейлиста"))),
             }
@@ -2840,7 +3150,7 @@ impl Ctx {
                     self.start();
                 }
                 "share" => {
-                    copy_text(&format!("https://music.yandex.ru/artist/{aid}"));
+                    sys::copy_text(&format!("https://music.yandex.ru/artist/{aid}"));
                     self.toast("Ссылка скопирована");
                 }
                 _ => {}
@@ -2856,6 +3166,7 @@ impl Ctx {
                 }
                 "like" => self.list_like(),
                 "trailer" => self.ui().global::<App>().invoke_list_trailer(),
+                "download" => self.ui().global::<App>().invoke_list_download(),
                 "vibe" => {
                     let Some(data) = self.list() else { return };
                     let Data::List(l) = &*data else { return };
@@ -2873,7 +3184,7 @@ impl Ctx {
                 "delete" => self.list_delete(),
                 "share-link" | "share-html" => {
                     if let Some(s) = self.list_link(rest == "share-html") {
-                        copy_text(&s);
+                        sys::copy_text(&s);
                         self.toast(if rest == "share-html" { "HTML-код скопирован" } else { "Ссылка скопирована" });
                     }
                 }
@@ -2894,9 +3205,10 @@ impl Ctx {
                 let Some(net) = net else { return };
                 let api = net.api.clone();
                 let dir = music_dir(&self.st.borrow().cfg);
+                let flac = self.st.borrow().cfg.download_flac;
                 self.toast(format!("Скачиваем «{}»", t.title));
                 std::thread::spawn(move || {
-                    let res = save_track(&api, &dir, &t);
+                    let res = save_track(&api, &dir, &t, flac);
                     net.say(match res {
                         Ok(p) => format!("Сохранено: {}", p.display()),
                         Err(e) => format!("Не удалось скачать: {e}"),
@@ -2914,7 +3226,7 @@ impl Ctx {
             "dislike" => self.player.send(Cmd::Dislike),
             "lyrics" => self.open_fullscreen(2),
             "share-link" => {
-                copy_text(&track_link(&t));
+                sys::copy_text(&track_link(&t));
                 self.toast("Ссылка скопирована");
             }
             "share-html" => {
@@ -2926,7 +3238,7 @@ impl Ctx {
                 if let Some(a) = t.artist_list.first() {
                     msg += &format!(" — <a href=\"https://music.yandex.ru/artist/{}\">{}</a>", a.id, a.name);
                 }
-                copy_text(&iframe_code(&frame, 614, 244, &msg));
+                sys::copy_text(&iframe_code(&frame, 614, 244, &msg));
                 self.toast("HTML-код скопирован");
             }
             "album" => {
@@ -2942,7 +3254,7 @@ impl Ctx {
                 }
             }
             "info" => self.toast(format!("{} — {} · {}", t.artists, t.title, mmss(t.duration_ms as f32 / 1000.0))),
-            "complain" => win::open_url("https://yandex.ru/support/music/"),
+            "complain" => sys::open_url("https://yandex.ru/support/music/"),
             _ => {}
         }
     }
@@ -3306,6 +3618,10 @@ impl Ctx {
                 drop(st);
                 self.release_chart();
             }
+            Page::History => {
+                drop(st);
+                self.release_history();
+            }
             Page::Artists => {
                 drop(st);
                 app.set_top_artists(ModelRc::default());
@@ -3315,7 +3631,7 @@ impl Ctx {
         }
         self.images.trim();
         if self.lite.get() {
-            win::release_memory();
+            sys::release_memory();
         }
     }
 
@@ -3350,6 +3666,7 @@ impl Ctx {
             "ar-popular" => self.st.borrow().artist_tracks.get(i).cloned(),
             "chart" => self.st.borrow().chart.get(i).cloned(),
             "results" => self.st.borrow().results.get(i).cloned(),
+            "history" => self.history_track(i),
             "likes-preview" => {
                 let data = self.collection()?;
                 let Data::Collection(c) = &*data else { return None };
@@ -3461,6 +3778,7 @@ impl Ctx {
         self.toast(format!("Скачиваем {}", tracks_word(tracks.len() as u64)));
         let api = net.api.clone();
         let dir = music_dir(&self.st.borrow().cfg).join(file_name(&folder));
+        let flac = self.st.borrow().cfg.download_flac;
         std::thread::spawn(move || {
             let total = tracks.len();
             let (mut ok, mut failed) = (0, 0);
@@ -3469,7 +3787,7 @@ impl Ctx {
                     ok += 1;
                     continue;
                 }
-                match save_track(&api, &dir, t) {
+                match save_track(&api, &dir, t, flac) {
                     Ok(_) => ok += 1,
                     Err(e) => {
                         failed += 1;
@@ -3494,101 +3812,7 @@ fn music_dir(cfg: &Config) -> std::path::PathBuf {
     if !cfg.download_dir.is_empty() {
         return cfg.download_dir.clone().into();
     }
-    std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка")
-}
-
-/// Расширение по первым байтам: mp3, AAC (ADTS), MP4 или FLAC.
-fn audio_ext(b: &[u8]) -> &'static str {
-    match b {
-        [b'I', b'D', b'3', ..] => "mp3",
-        [_, _, _, _, b'f', b't', b'y', b'p', ..] => "m4a",
-        [b'f', b'L', b'a', b'C', ..] => "flac",
-        [0xFF, x, ..] if x & 0xF6 == 0xF0 => "aac",
-        _ => "mp3",
-    }
-}
-
-fn track_file_stem(t: &Track) -> String {
-    file_name_max(&format!("{} — {}", t.artists, t.title), 120)
-}
-
-/// Трек уже скачан: готовый файл (не `.part`) с ненулевым размером.
-fn saved_already(dir: &std::path::Path, t: &Track) -> bool {
-    let stem = track_file_stem(t);
-    ["mp3", "m4a", "aac", "flac"]
-        .iter()
-        .any(|e| std::fs::metadata(dir.join(format!("{stem}.{e}"))).is_ok_and(|m| m.len() > 0))
-}
-
-/// Скачать трек: сначала в `.part`, теги — в mp3, и только после этого переименовать в
-/// готовое имя. Обрыв оставит лишь `.part`, который следующая попытка перезапишет.
-fn save_track(api: &Api, dir: &std::path::Path, t: &Track) -> Result<std::path::PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let stem = track_file_stem(t);
-    let part = dir.join(format!("{stem}.part"));
-    let mut last = String::new();
-    for attempt in 0..3 {
-        if attempt > 0 {
-            std::thread::sleep(Duration::from_secs(2 * attempt));
-        }
-        match api.stream_url(&t.id).and_then(|u| api.download_to(&u, &part)) {
-            Ok(n) if n > 0 => {
-                last.clear();
-                break;
-            }
-            Ok(_) => last = "пустой файл".into(),
-            Err(e) => last = e,
-        }
-    }
-    if !last.is_empty() {
-        let _ = std::fs::remove_file(&part);
-        return Err(last);
-    }
-    let finish = || -> Result<std::path::PathBuf, String> {
-        let mut head = [0u8; 16];
-        {
-            use std::io::Read as _;
-            let mut f = std::fs::File::open(&part).map_err(|e| e.to_string())?;
-            let n = f.read(&mut head).map_err(|e| e.to_string())?;
-            if n < head.len() {
-                return Err("файл слишком короткий".into());
-            }
-        }
-        let ext = audio_ext(&head);
-        let path = dir.join(format!("{stem}.{ext}"));
-        if ext == "mp3" {
-            let cover = t.cover_url(400).and_then(|u| api.fetch_bytes(&u).ok());
-            let tag = crate::tags::id3(&crate::tags::Tags {
-                title: &if t.version.is_empty() { t.title.clone() } else { format!("{} ({})", t.title, t.version) },
-                artist: &t.artists,
-                album: &t.album_title,
-                year: t.year,
-                track: t.position,
-                cover: cover.as_deref(),
-            });
-            let tagged = dir.join(format!("{stem}.tagged.part"));
-            {
-                use std::io::{Read as _, Seek as _, Write as _};
-                let mut src = std::fs::File::open(&part).map_err(|e| e.to_string())?;
-                let mut probe = vec![0u8; 10];
-                let _ = src.read(&mut probe);
-                let skip = crate::tags::existing_id3_len(&probe) as u64;
-                src.seek(std::io::SeekFrom::Start(skip)).map_err(|e| e.to_string())?;
-                let mut out = std::fs::File::create(&tagged).map_err(|e| e.to_string())?;
-                out.write_all(&tag).map_err(|e| e.to_string())?;
-                std::io::copy(&mut src, &mut out).map_err(|e| e.to_string())?;
-                out.sync_all().map_err(|e| e.to_string())?;
-            }
-            let _ = std::fs::remove_file(&part);
-            std::fs::rename(&tagged, &path).map_err(|e| e.to_string())?;
-        } else {
-            std::fs::rename(&part, &path).map_err(|e| e.to_string())?;
-        }
-        Ok(path)
-    };
-    finish().inspect_err(|_| {
-        let _ = std::fs::remove_file(&part);
-    })
+    sys::music_dir().join("Яндекс Музыка")
 }
 
 /// Колбэки новых экранов: поиск, исполнитель, полноэкранный плеер, меню, настройки звука.
@@ -3683,10 +3907,10 @@ fn register_extra(app: &App) {
             }
         })
     });
-    app.on_login_open(|| win::open_url("https://ya.ru/device"));
+    app.on_login_open(|| sys::open_url("https://ya.ru/device"));
     app.on_login_copy(|| {
         with_ctx(|c| {
-            copy_text(&c.ui().global::<App>().get_login_code());
+            sys::copy_text(&c.ui().global::<App>().get_login_code());
             c.toast("Код скопирован");
         })
     });
@@ -3836,9 +4060,9 @@ fn register_extra(app: &App) {
     });
     app.on_artist_familiar(|| {
         with_ctx(|c| {
-            let Some((id, name)) = c.current_artist() else { return };
-            c.player.send(Cmd::Wave(Source::Seed { station: format!("artist:{id}"), header: "Моя волна по исполнителю".into(), title: name }));
-            c.start();
+            if let Some((id, _)) = c.current_artist() {
+                c.navigate(Page::List, Some(format!("familiar:{id}")), true);
+            }
         })
     });
 

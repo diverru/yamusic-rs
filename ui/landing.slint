@@ -70,6 +70,13 @@ component LHeader inherits Rectangle {
         CarouselArrow { icon: Icons.arrow-left-small; enabled: root.can-back; clicked => { root.back(); } }
         CarouselArrow { icon: Icons.arrow-right-small; enabled: root.can-forward; clicked => { root.forward(); } }
     }
+    if block.can-hide && App.landing-hover == root.index: CarouselArrow {
+        x: root.width - (arrows ? 72px + 41px : 31px);
+        y: has-cover ? 4px : -2px;
+        icon: Icons.close-small;
+        enabled: true;
+        clicked => { App.landing-hide(root.index); }
+    }
 }
 
 // Вкладка-«таблетка» с обложками: большая у страницы (54), маленькая у блока «В стиле» (44).

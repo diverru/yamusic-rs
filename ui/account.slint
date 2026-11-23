@@ -65,6 +65,23 @@ component PickRow inherits Rectangle {
     }
 }
 
+component Toggle inherits Rectangle {
+    in property <bool> on;
+    width: 32px;
+    height: 20px;
+    border-radius: 10px;
+    background: on ? #ffee00 : Theme.dark ? #ffffff1f : #00000012;
+    Rectangle {
+        x: on ? 14px : 2px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: on ? #000000 : Theme.dark ? #ffffff66 : #ffffffa3;
+        animate x { duration: App.motion ? 150ms : 0ms; }
+    }
+}
+
 export component AccountMenu inherits Rectangle {
     property <color> ink: Theme.dark ? #ffffff : #262633;
     property <brush> bg: Theme.dark ? #1f1f22 : #ffffff;
@@ -87,7 +104,7 @@ export component AccountMenu inherits Rectangle {
         x: 28px;
         y: root.height - 90px - self.height;
         width: 320px;
-        height: 399px;
+        height: 443px;
         border-radius: 24px;
         background: bg;
         drop-shadow-blur: 24px;
@@ -159,12 +176,23 @@ export component AccountMenu inherits Rectangle {
             active: App.account-sub == 1;
             clicked => { App.account-sub = App.account-sub == 1 ? -1 : 1; }
         }
+        // Своё, в Яндекс ID такого нет: просили держать под рукой, а не в настройках.
+        IdRow {
+            x: 8px;
+            y: 383px;
+            width: 296px;
+            ink: ink;
+            icon: Icons.explicit;
+            text: T.t("Треки 18+");
+            clicked => { root.act("explicit"); }
+            Toggle { x: parent.width - 16px - self.width; on: App.allow-explicit; }
+        }
 
         if App.account-sub == 0: Rectangle {
             x: 12px;
             y: 276px - 10px - self.height;
             width: 296px;
-            height: 4 * 48px;
+            height: (App.translations ? 4 : 1) * 48px;
             border-radius: 20px;
             background: bg;
             drop-shadow-blur: 16px;
@@ -172,9 +200,9 @@ export component AccountMenu inherits Rectangle {
             drop-shadow-color: #00000033;
             TouchArea { }
             PickRow { y: 0; width: parent.width; ink: ink; code: "ru"; text: "Русский"; selected: App.lang == "ru"; clicked => { root.act("lang:ru"); } }
-            PickRow { y: 48px; width: parent.width; ink: ink; code: "en"; text: "English"; selected: App.lang == "en"; clicked => { root.act("lang:en"); } }
-            PickRow { y: 96px; width: parent.width; ink: ink; code: "uz"; text: "O‘zbek"; selected: App.lang == "uz"; clicked => { root.act("lang:uz"); } }
-            PickRow { y: 144px; width: parent.width; ink: ink; code: "kk"; text: "Қазақша"; selected: App.lang == "kk"; clicked => { root.act("lang:kk"); } }
+            PickRow { y: 48px; visible: App.translations; width: parent.width; ink: ink; code: "en"; text: "English"; selected: App.lang == "en"; clicked => { root.act("lang:en"); } }
+            PickRow { y: 96px; visible: App.translations; width: parent.width; ink: ink; code: "uz"; text: "O‘zbek"; selected: App.lang == "uz"; clicked => { root.act("lang:uz"); } }
+            PickRow { y: 144px; visible: App.translations; width: parent.width; ink: ink; code: "kk"; text: "Қазақша"; selected: App.lang == "kk"; clicked => { root.act("lang:kk"); } }
         }
         if App.account-sub == 1: Rectangle {
             x: 12px;
@@ -191,23 +219,6 @@ export component AccountMenu inherits Rectangle {
             PickRow { y: 48px; width: parent.width; ink: ink; icon: Icons.id-dark; text: T.t("Всегда тёмный"); selected: App.theme-mode == "dark"; clicked => { root.act("theme:dark"); } }
             PickRow { y: 96px; width: parent.width; ink: ink; icon: Icons.id-system; text: T.t("Как в системе"); selected: App.theme-mode != "light" && App.theme-mode != "dark"; clicked => { root.act("theme:system"); } }
         }
-    }
-}
-
-component Toggle inherits Rectangle {
-    in property <bool> on;
-    width: 32px;
-    height: 20px;
-    border-radius: 10px;
-    background: on ? #ffee00 : Theme.dark ? #ffffff1f : #00000012;
-    Rectangle {
-        x: on ? 14px : 2px;
-        y: 2px;
-        width: 16px;
-        height: 16px;
-        border-radius: 8px;
-        background: on ? #000000 : Theme.dark ? #ffffff66 : #ffffffa3;
-        animate x { duration: App.motion ? 150ms : 0ms; }
     }
 }
 
@@ -352,9 +363,28 @@ export component SettingsPage inherits Rectangle {
                 }
             }
             SettingItem {
+                title: T.t("Логарифмическая громкость");
+                desc: T.t("Громкость меняется ровнее на слух, тихие уровни настраиваются точнее");
+                toggle: true;
+                on: App.log-volume;
+                clicked => { App.setting("log-volume"); }
+            }
+            SettingItem {
                 title: T.t("Папка для скачивания");
                 desc: App.download-dir;
                 clicked => { App.setting("download-dir"); }
+            }
+            SettingItem {
+                title: T.t("Скачивать в FLAC");
+                desc: T.t("Без потерь, если у трека есть такая версия. Если нет, скачается MP3");
+                toggle: true;
+                on: App.download-flac;
+                clicked => { App.setting("download-flac"); }
+            }
+            if App.hidden-blocks != "": SettingItem {
+                title: T.t("Вернуть скрытые блоки");
+                desc: App.hidden-blocks;
+                clicked => { App.setting("hidden-blocks"); }
             }
             SettingItem {
                 title: T.t("Меньше ИИ");
@@ -363,16 +393,23 @@ export component SettingsPage inherits Rectangle {
                 on: App.less-ai;
                 clicked => { App.setting("less-ai"); }
             }
-            SettingItem {
+            if App.discord-supported: SettingItem {
                 title: T.t("Статус в Discord");
                 desc: App.discord-on && App.discord-status != "" ? App.discord-status : T.t("Показывать в профиле Discord, что вы слушаете");
                 toggle: true;
                 on: App.discord-on;
                 clicked => { App.setting("discord"); }
             }
+            if App.macos: SettingItem {
+                title: T.t("GPU-ускорение");
+                desc: T.t("Интерфейс рисует видеокарта вместо процессора. Применится после перезапуска");
+                toggle: true;
+                on: App.gpu;
+                clicked => { App.setting("gpu"); }
+            }
             SettingItem {
-                title: T.t("Запускать вместе с Windows");
-                desc: T.t("Приложение откроется в трее, без окна");
+                title: App.linux || App.macos ? T.t("Запускать вместе с системой") : T.t("Запускать вместе с Windows");
+                desc: App.linux ? T.t("Приложение откроется при входе в систему") : App.macos ? T.t("Приложение откроется в меню-баре, без окна") : T.t("Приложение откроется в трее, без окна");
                 toggle: true;
                 on: App.autostart;
                 clicked => { App.setting("autostart"); }

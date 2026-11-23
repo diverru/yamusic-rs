@@ -1,6 +1,6 @@
 //! Шрифты и иконки берутся из установленного официального приложения (app.asar).
 //! В репозитории их нет. Если приложение не установлено, те же файлы один раз скачиваются
-//! с веб-версии music.yandex.ru в %APPDATA%\yamusic-rs\assets и дальше читаются оттуда.
+//! с веб-версии music.yandex.ru в кэш (`config::cache_dir`) и дальше читаются оттуда.
 
 use crate::config::log;
 use std::collections::HashMap;
@@ -14,14 +14,37 @@ pub struct Asar {
     index: serde_json::Value,
 }
 
-pub fn asar_path() -> PathBuf {
-    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-    PathBuf::from(local).join("Programs").join("YandexMusic").join("resources").join("app.asar")
+/// Официального клиента под Linux нет, там ассеты только с сайта.
+fn asar_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return mac_asar_path();
+    #[cfg(not(target_os = "macos"))]
+    {
+        if cfg!(not(windows)) {
+            return None;
+        }
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        Some(PathBuf::from(local).join("Programs").join("YandexMusic").join("resources").join("app.asar"))
+    }
+}
+
+/// На macOS официальное приложение — «Yandex Music.app» (или «Яндекс Музыка.app») в /Applications
+/// либо ~/Applications; точное имя бывает разным, поэтому его ищем по названию.
+#[cfg(target_os = "macos")]
+fn mac_asar_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    ["/Applications".to_string(), format!("{home}/Applications")].into_iter().find_map(|dir| {
+        std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).find_map(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            let ours = name.ends_with(".app") && (name.starts_with("yandex") || name.starts_with("яндекс")) && (name.contains("music") || name.contains("музык"));
+            ours.then(|| e.path().join("Contents/Resources/app.asar")).filter(|p| p.exists())
+        })
+    })
 }
 
 impl Asar {
     pub fn open() -> Option<Asar> {
-        let mut file = File::open(asar_path()).ok()?;
+        let mut file = File::open(asar_path()?).ok()?;
         let mut head = [0u8; 16];
         file.read_exact(&mut head).ok()?;
         let u = |i: usize| u32::from_le_bytes(head[i..i + 4].try_into().unwrap());
@@ -105,7 +128,7 @@ const WEB_ORIGIN: &str = "https://music.yandex.ru";
 
 impl WebCache {
     fn new() -> WebCache {
-        WebCache { dir: crate::config::dir().join("assets"), http: None }
+        WebCache { dir: crate::config::cache_dir().join("assets"), http: None }
     }
 
     fn read(&mut self, path: &str) -> Option<Vec<u8>> {
@@ -126,7 +149,13 @@ impl WebCache {
                 .build()
                 .expect("http client")
         });
-        let resp = http.get(format!("{WEB_ORIGIN}/{rel}")).send().ok()?;
+        let resp = match http.get(format!("{WEB_ORIGIN}/{rel}")).send() {
+            Ok(r) => r,
+            Err(e) => {
+                log(format!("ассет {rel}: {e}"));
+                return None;
+            }
+        };
         if !resp.status().is_success() {
             log(format!("ассет {rel}: HTTP {}", resp.status()));
             return None;

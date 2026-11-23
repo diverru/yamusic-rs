@@ -1,11 +1,12 @@
-//! Discord Rich Presence через локальный IPC Discord (named pipe) — без сторонних библиотек.
+//! Discord Rich Presence через локальный IPC Discord (named pipe на Windows, unix-сокет на Linux) — без сторонних библиотек.
 //! Показывает «Слушает …»: трек, исполнитель, обложка, полоска прогресса, кнопка на трек.
+//! На macOS статус выключен: поток не запускается (`spawn` только создаёт настройки).
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 use crate::api::Track;
 use crate::config::log;
 use crate::player::{Player, Status};
 use serde_json::{json, Value};
-use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -29,9 +30,28 @@ pub struct Discord {
     pub status: Mutex<String>,
 }
 
+#[cfg(windows)]
+type Pipe = std::fs::File;
+#[cfg(unix)]
+type Pipe = std::os::unix::net::UnixStream;
+
 struct Conn {
-    pipe: File,
+    pipe: Pipe,
     nonce: u64,
+}
+
+#[cfg(windows)]
+fn open_pipe(i: u32) -> Option<Pipe> {
+    std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{i}")).ok()
+}
+
+/// Сокет лежит в XDG_RUNTIME_DIR, у Flatpak и Snap — в своих подпапках.
+#[cfg(unix)]
+fn open_pipe(i: u32) -> Option<Pipe> {
+    let dirs = ["XDG_RUNTIME_DIR", "TMPDIR"].into_iter().filter_map(std::env::var_os).map(std::path::PathBuf::from);
+    dirs.chain([std::path::PathBuf::from("/tmp")])
+        .flat_map(|d| ["", "app/com.discordapp.Discord", "snap.discord"].map(|sub| d.join(sub).join(format!("discord-ipc-{i}"))))
+        .find_map(|p| Pipe::connect(p).ok())
 }
 
 fn now_ms() -> i64 {
@@ -42,7 +62,7 @@ impl Conn {
     fn connect(app_id: &str) -> Result<Conn, String> {
         let mut last = "Discord не запущен".to_string();
         for i in 0..10 {
-            let Ok(pipe) = OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{i}")) else {
+            let Some(pipe) = open_pipe(i) else {
                 continue;
             };
             let mut c = Conn { pipe, nonce: 0 };
@@ -156,11 +176,16 @@ fn activity(t: &Track, start: i64, end: Option<i64>, with_display_type: bool) ->
 impl Discord {
     pub fn spawn(player: Player, cfg: DiscordCfg) -> Arc<Discord> {
         let d = Arc::new(Discord { cfg: Mutex::new(cfg), status: Mutex::new(String::new()) });
-        let me = d.clone();
-        thread::Builder::new()
-            .name("discord".into())
-            .spawn(move || me.run(player))
-            .expect("discord thread");
+        #[cfg(not(target_os = "macos"))]
+        {
+            let me = d.clone();
+            thread::Builder::new()
+                .name("discord".into())
+                .spawn(move || me.run(player))
+                .expect("discord thread");
+        }
+        #[cfg(target_os = "macos")]
+        let _ = player;
         d
     }
 

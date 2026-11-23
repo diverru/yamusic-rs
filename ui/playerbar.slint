@@ -274,6 +274,11 @@ export component MiniPlayer inherits Rectangle {
             }
         }
         double-clicked => { App.toggle-mini(); }
+        // Колёсико над плашкой меняет громкость, как над ползунком в большом плеере.
+        scroll-event(e) => {
+            App.set-volume(max(0, min(1, App.volume + (e.delta-y > 0 ? 0.02 : -0.02))));
+            accept
+        }
 
         if on: Rectangle {
             x: 0;
@@ -326,6 +331,47 @@ export component MiniPlayer inherits Rectangle {
         }
         BarButton { x: parent.width - 48px; y: 28px; icon: Icons.next-small; icon-size: 20px; enabled: on; clicked => { App.next(); } }
 
+        // Громкость при наведении: значок выключает звук, полоску можно тянуть.
+        if ta.has-hover || vol-ta.pressed: BarButton {
+            x: parent.width - 172px;
+            y: 2px;
+            width: 24px;
+            height: 24px;
+            icon: App.volume <= 0 ? Icons.volume-off : Icons.volume;
+            icon-size: 16px;
+            clicked => { App.toggle-mute(); }
+        }
+        Rectangle {
+            x: parent.width - 144px;
+            y: 2px;
+            width: 80px;
+            height: 24px;
+            visible: ta.has-hover || vol-ta.pressed;
+            property <float> v: max(0, min(1, App.volume));
+            Rectangle { y: 10px; height: 4px; border-radius: 2px; background: #ffffff33; }
+            Rectangle { x: 0; y: 10px; width: parent.width * v; height: 4px; border-radius: 2px; background: #ffffffcc; }
+            Rectangle {
+                x: parent.width * v - 5px;
+                y: 7px;
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: vol-ta.has-hover || vol-ta.pressed ? Theme.controls-color-primary-default-enabled : #ffffff;
+            }
+            vol-ta := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down {
+                        App.set-volume(max(0, min(1, self.mouse-x / self.width)));
+                    }
+                }
+                moved => {
+                    if self.pressed {
+                        App.set-volume(max(0, min(1, self.mouse-x / self.width)));
+                    }
+                }
+            }
+        }
         if ta.has-hover: BarButton { x: parent.width - 52px; y: 2px; width: 24px; height: 24px; icon: Icons.fullscreen; icon-size: 16px; clicked => { App.toggle-mini(); } }
         if ta.has-hover: BarButton { x: parent.width - 28px; y: 2px; width: 24px; height: 24px; icon: Icons.close-xs; icon-size: 16px; clicked => { App.close(); } }
     }
