@@ -393,26 +393,26 @@ export component SettingsPage inherits Rectangle {
                 on: App.less-ai;
                 clicked => { App.setting("less-ai"); }
             }
-            SettingItem {
+            if App.discord-supported: SettingItem {
                 title: T.t("Статус в Discord");
                 desc: App.discord-on && App.discord-status != "" ? App.discord-status : T.t("Показывать в профиле Discord, что вы слушаете");
                 toggle: true;
                 on: App.discord-on;
                 clicked => { App.setting("discord"); }
             }
+            if App.macos: SettingItem {
+                title: T.t("GPU-ускорение");
+                desc: T.t("Интерфейс рисует видеокарта вместо процессора. Применится после перезапуска");
+                toggle: true;
+                on: App.gpu;
+                clicked => { App.setting("gpu"); }
+            }
             SettingItem {
-                title: App.linux ? T.t("Запускать вместе с системой") : T.t("Запускать вместе с Windows");
-                desc: App.linux ? T.t("Приложение откроется при входе в систему") : T.t("Приложение откроется в трее, без окна");
+                title: App.linux || App.macos ? T.t("Запускать вместе с системой") : T.t("Запускать вместе с Windows");
+                desc: App.linux ? T.t("Приложение откроется при входе в систему") : App.macos ? T.t("Приложение откроется в меню-баре, без окна") : T.t("Приложение откроется в трее, без окна");
                 toggle: true;
                 on: App.autostart;
                 clicked => { App.setting("autostart"); }
-            }
-            SettingItem {
-                title: T.t("Проверять обновления");
-                desc: T.t("Раз в полчаса спрашивать GitHub, нет ли новой версии");
-                toggle: true;
-                on: App.check-updates;
-                clicked => { App.setting("check-updates"); }
             }
             SettingItem {
                 title: T.t("Выйти из аккаунта");

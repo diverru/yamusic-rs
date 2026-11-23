@@ -1,5 +1,7 @@
 //! Discord Rich Presence через локальный IPC Discord (named pipe на Windows, unix-сокет на Linux) — без сторонних библиотек.
 //! Показывает «Слушает …»: трек, исполнитель, обложка, полоска прогресса, кнопка на трек.
+//! На macOS статус выключен: поток не запускается (`spawn` только создаёт настройки).
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 use crate::api::Track;
 use crate::config::log;
@@ -174,11 +176,16 @@ fn activity(t: &Track, start: i64, end: Option<i64>, with_display_type: bool) ->
 impl Discord {
     pub fn spawn(player: Player, cfg: DiscordCfg) -> Arc<Discord> {
         let d = Arc::new(Discord { cfg: Mutex::new(cfg), status: Mutex::new(String::new()) });
-        let me = d.clone();
-        thread::Builder::new()
-            .name("discord".into())
-            .spawn(move || me.run(player))
-            .expect("discord thread");
+        #[cfg(not(target_os = "macos"))]
+        {
+            let me = d.clone();
+            thread::Builder::new()
+                .name("discord".into())
+                .spawn(move || me.run(player))
+                .expect("discord thread");
+        }
+        #[cfg(target_os = "macos")]
+        let _ = player;
         d
     }
 

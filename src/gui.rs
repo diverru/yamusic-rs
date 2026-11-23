@@ -1309,68 +1309,6 @@ fn retry_assets(ui: &AppWindow) {
     });
 }
 
-thread_local! {
-    /// Найденный новый релиз — для кнопки «Обновить».
-    static UPDATE: RefCell<Option<crate::update::Release>> = const { RefCell::new(None) };
-}
-
-/// Проверка обновлений в фоне (первая — через 10 с после запуска) и кнопка «Обновить» в тосте.
-fn start_updates(ui: &AppWindow) {
-    let weak = ui.as_weak();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
-        loop {
-            if !crate::update::ENABLED.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_secs(60));
-                continue;
-            }
-            match crate::update::check() {
-                Ok(Some(r)) => {
-                    let weak = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.global::<App>().set_update_version(r.version.clone().into());
-                            UPDATE.with(|u| *u.borrow_mut() = Some(r));
-                        }
-                    });
-                }
-                Ok(None) => {}
-                Err(e) => log(format!("обновления: {e}")),
-            }
-            std::thread::sleep(crate::update::POLL);
-        }
-    });
-    ui.global::<App>().on_update_changes(|| {
-        if let Some(r) = UPDATE.with(|u| u.borrow().clone()) {
-            sys::open_url(&crate::update::changes_url(&r.version));
-        }
-    });
-    ui.global::<App>().on_update_install(|| {
-        let Some(r) = UPDATE.with(|u| u.borrow().clone()) else { return };
-        // В релизе нет exe — обновить можно только руками, ведём на страницу.
-        if r.exe.is_none() {
-            sys::open_url(&r.page);
-            return;
-        }
-        with_ctx(|c| c.ui().global::<App>().set_update_busy(true));
-        std::thread::spawn(move || {
-            let res = crate::update::install(&r).and_then(|exe| crate::update::relaunch(&exe));
-            let _ = slint::invoke_from_event_loop(move || match res {
-                // Новая версия ждёт, пока мы закроемся.
-                Ok(()) => quit(),
-                Err(e) => {
-                    log(format!("обновление: {e}"));
-                    with_ctx(|c| {
-                        c.ui().global::<App>().set_update_busy(false);
-                        c.toast(format!("Не удалось обновить: {e}"));
-                    });
-                    sys::open_url(&r.page);
-                }
-            });
-        });
-    });
-}
-
 /// Иконки меню профиля: из кэша сразу, иначе скачиваются в фоне и подставляются, когда готовы.
 fn load_id_icons(ui: &AppWindow) {
     fn apply(ui: &AppWindow, svgs: &crate::yandex_id::Svgs) {
@@ -1550,8 +1488,6 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         None => retry_assets(&ui),
     }
     load_id_icons(&ui);
-    crate::update::ENABLED.store(cfg.check_updates, Ordering::Relaxed);
-    start_updates(&ui);
 
     crate::api::ALLOW_EXPLICIT.store(cfg.allow_explicit, Ordering::Relaxed);
     let player = Player::spawn(notifier());
@@ -1579,10 +1515,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         crate::discord::DiscordCfg { enabled: cfg.discord_enabled, app_id: cfg.discord_app_id.clone() },
     );
     app.set_discord_on(cfg.discord_enabled);
+    app.set_discord_supported(!cfg!(target_os = "macos"));
+    app.set_gpu(cfg.gpu);
     app.set_autostart(sys::autostart_enabled());
-    app.set_check_updates(cfg.check_updates);
     app.set_allow_explicit(cfg.allow_explicit);
     app.set_linux(cfg!(target_os = "linux"));
+    app.set_macos(cfg!(target_os = "macos"));
     app.set_translations(crate::i18n::available());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     app.set_download_flac(cfg.download_flac);
@@ -1931,9 +1869,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().set_minimized(true);
         }
     });
-    // Как у оригинала на Windows: пока играет трек, окно прячется в трей, иначе приложение закрывается.
-    // На Linux трея пока нет, там закрытие всегда выход.
-    #[cfg(windows)]
+    // Как у оригинала на Windows: пока играет трек, окно прячется в трей (на macOS — в меню-бар),
+    // иначе приложение закрывается. На Linux трея пока нет, там закрытие всегда выход.
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let weak = ui.as_weak();
         let p = player.clone();
@@ -1951,7 +1889,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         });
         install_tray(&ui, &player);
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
         app.on_close(quit);
         let weak = ui.as_weak();
@@ -1959,6 +1897,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
         });
         install_mpris(&ui, &player);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let weak = ui.as_weak();
+        sys::on_wake(move || {
+            let _ = weak.upgrade_in_event_loop(|ui| reveal(&ui));
+        });
+        install_media(&ui, &player);
     }
     // Alt+F4 и закрытие из панели задач: Slint сам только прячет окно, а процесс остаётся жить.
     let weak = ui.as_weak();
@@ -2013,11 +1959,11 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         })
     });
 
-    // «Как в системе» следит за темой Windows и на ходу. На Linux её отдаёт портал через
+    // «Как в системе» следит за темой Windows и macOS и на ходу. На Linux её отдаёт портал через
     // gdbus, запускать его каждые пару секунд не стоит.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let theme_tick = Timer::default();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     theme_tick.start(TimerMode::Repeated, Duration::from_secs(2), || {
         with_ctx(|c| {
             if c.st.borrow().cfg.theme != "system" {
@@ -2052,9 +1998,26 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     if !start_hidden {
         reveal(&ui);
     }
+    // Выход сохраняет окно и убирает за собой; на macOS его же зовёт Cmd+Q, мимо цикла событий.
+    let finish = Rc::new({
+        let (weak, places, done) = (ui.as_weak(), places.clone(), Cell::new(false));
+        move || {
+            if done.replace(true) {
+                return;
+            }
+            if let Some(ui) = weak.upgrade() {
+                save_places(&ui, &places);
+            }
+            sys::cleanup();
+        }
+    });
+    #[cfg(target_os = "macos")]
+    {
+        let finish = finish.clone();
+        sys::on_terminate(move || finish());
+    }
     slint::run_event_loop_until_quit()?;
-    save_places(&ui, &places);
-    sys::cleanup();
+    finish();
     // Фоновые потоки (аудио, сеть, обложки) не ждём: иначе процесс может остаться
     // без окна и держать мьютекс, и следующий запуск молча закроется.
     std::process::exit(0)
@@ -2088,7 +2051,30 @@ fn install_mpris(ui: &AppWindow, player: &Player) {
     });
 }
 
-#[cfg(windows)]
+/// Медиаклавиши и «Сейчас играет» на macOS. Команды выполняются так же, как кнопки в окне.
+#[cfg(target_os = "macos")]
+fn install_media(ui: &AppWindow, player: &Player) {
+    let weak = ui.as_weak();
+    let p = player.clone();
+    crate::now_playing::spawn(player.clone(), move |e| {
+        let p = p.clone();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            use crate::now_playing::Event;
+            let s = p.state();
+            match e {
+                Event::PlayPause => ui.global::<App>().invoke_play_pause(),
+                Event::Play if !s.playing => ui.global::<App>().invoke_play_pause(),
+                Event::Pause if s.playing => ui.global::<App>().invoke_play_pause(),
+                Event::Play | Event::Pause => {}
+                Event::Next => p.send(Cmd::Next),
+                Event::Prev => p.send(Cmd::Prev),
+                Event::Seek(sec) => p.send(Cmd::Seek(sec)),
+            }
+        });
+    });
+}
+
+#[cfg(any(windows, target_os = "macos"))]
 fn install_tray(ui: &AppWindow, player: &Player) {
     let weak = ui.as_weak();
     let p = player.clone();
@@ -2110,7 +2096,6 @@ fn install_tray(ui: &AppWindow, player: &Player) {
                 Event::PlayPause => ui.global::<App>().invoke_play_pause(),
                 Event::Prev => p.send(Cmd::Prev),
                 Event::Next => p.send(Cmd::Next),
-                Event::Updates => sys::open_url(concat!(env!("CARGO_PKG_REPOSITORY"), "/releases")),
                 Event::Terms => sys::open_url("https://yandex.ru/legal/music_mobile_agreement/"),
                 Event::Recommendations => sys::open_url("https://music.yandex.ru/legal/recommendations/ru/#music"),
                 Event::Support => sys::open_url(SUPPORT_CHAT),
@@ -2341,7 +2326,7 @@ impl Ctx {
                 st.cfg.refresh_token = t.refresh;
             }
             st.cfg.token_expires = t.expires_in.map(|s| crate::config::now_secs() + s);
-            st.cfg.save();
+            st.cfg.save_explicit();
         }
         let ui = self.ui();
         let app = ui.global::<App>();
@@ -2388,8 +2373,7 @@ impl Ctx {
                     Err(e) => log(format!("выход: токен не отозван: {e}")),
                 });
             }
-            st.cfg.forget_token();
-            st.cfg.forget_refresh();
+            st.cfg.forget_account();
             st.cfg.token_expires = None;
             st.cfg.save();
             st.net = None;
@@ -2842,6 +2826,16 @@ impl Ctx {
                 st.cfg.discord_enabled = on;
                 st.cfg.save();
             }
+            "gpu" => {
+                let on = !app.get_gpu();
+                app.set_gpu(on);
+                {
+                    let mut st = self.st.borrow_mut();
+                    st.cfg.gpu = on;
+                    st.cfg.save();
+                }
+                self.toast(if on { "GPU-ускорение включится после перезапуска" } else { "GPU-ускорение выключится после перезапуска" });
+            }
             "autostart" => {
                 let on = !app.get_autostart();
                 if sys::set_autostart(on) {
@@ -2849,18 +2843,6 @@ impl Ctx {
                 } else {
                     self.toast("Не удалось изменить автозапуск");
                 }
-            }
-            "check-updates" => {
-                let on = !app.get_check_updates();
-                app.set_check_updates(on);
-                crate::update::ENABLED.store(on, Ordering::Relaxed);
-                if !on {
-                    app.set_update_version(SharedString::new());
-                    UPDATE.with(|u| *u.borrow_mut() = None);
-                }
-                let mut st = self.st.borrow_mut();
-                st.cfg.check_updates = on;
-                st.cfg.save();
             }
             "logout" => self.logout(),
             _ => {}

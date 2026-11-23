@@ -24,6 +24,9 @@ pub struct Config {
     /// Unix-время, когда токен истечёт.
     pub token_expires: Option<u64>,
     pub volume: f32,
+    /// Интерфейс рисует видеокарта (Skia через wgpu, на macOS — Metal), а не процессор.
+    /// Включается в настройках и применяется после перезапуска.
+    pub gpu: bool,
     pub discord_enabled: bool,
     pub discord_app_id: String,
     /// system / light / dark
@@ -47,8 +50,6 @@ pub struct Config {
     pub log_volume: bool,
     /// Блоки главной и «Книг и подкастов», которые скрыл пользователь.
     pub hidden_blocks: Vec<HiddenBlock>,
-    /// Раз в полчаса спрашивать GitHub о новой версии.
-    pub check_updates: bool,
     /// «Треки 18+» в меню профиля.
     pub allow_explicit: bool,
     /// Добавлять треки в конец плейлиста, а не в начало.
@@ -79,6 +80,7 @@ impl Default for Config {
             token_plain: None,
             token_expires: None,
             volume: 0.6,
+            gpu: false,
             discord_enabled: true,
             discord_app_id: String::new(),
             theme: "system".into(),
@@ -94,7 +96,6 @@ impl Default for Config {
             download_flac: false,
             log_volume: false,
             hidden_blocks: Vec::new(),
-            check_updates: true,
             allow_explicit: true,
             add_to_end: false,
             window_pos: None,
@@ -105,8 +106,8 @@ impl Default for Config {
     }
 }
 
-/// %APPDATA%\yamusic-rs или ~/.config/yamusic-rs. Папка прежнего названия (yamusic-lite, ещё раньше yawave) переносится
-/// молча, вместе с токеном и настройками. Если её держит запущенная старая версия, этот запуск
+/// %APPDATA%\yamusic-rs, ~/.config/yamusic-rs или ~/Library/Application Support/yamusic-rs. Папка прежнего
+/// названия (yamusic-lite, ещё раньше yawave) переносится молча, вместе с токеном и настройками. Если её держит запущенная старая версия, этот запуск
 /// работает со старой папкой, а перенос повторится в следующий раз.
 pub fn dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -125,7 +126,13 @@ pub fn dir() -> PathBuf {
     .clone()
 }
 
-/// Скачанные шрифты и значки. На Windows лежат рядом с настройками, на Linux — в ~/.cache.
+/// Включён ли GPU-рендер. Нужен ещё до окна, поэтому читает только этот ключ: без токенов и связки ключей.
+pub fn gpu_enabled() -> bool {
+    let text = std::fs::read_to_string(dir().join("config.json")).unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("gpu")?.as_bool()).unwrap_or(false)
+}
+
+/// Скачанные шрифты и значки. На Windows и macOS лежат рядом с настройками, на Linux — в ~/.cache.
 pub fn cache_dir() -> PathBuf {
     #[cfg(windows)]
     return dir();
@@ -154,19 +161,28 @@ impl Config {
         c
     }
 
+    /// Сохранение при входе: пользователь сам меняет аккаунт, и новое состояние должно лечь на место
+    /// старого, даже если связка ключей (macOS) при запуске не прочиталась.
+    pub fn save_explicit(&self) {
+        crate::secret::explicit_change();
+        self.save();
+    }
+
     pub fn save(&self) {
         let _ = std::fs::create_dir_all(dir());
         let mut disk = self.clone();
         // Токен не прочитался (связка ключей заперта) — запись о нём не трогаем, иначе после
-        // разблокировки входить придётся заново. Стирают её только forget_token и forget_refresh.
-        if let Some(t) = &self.token {
-            disk.token_sealed = crate::secret::seal("token", t);
+        // разблокировки входить придётся заново. Стирают её только forget_token и forget_account.
+        let [token, refresh] = crate::secret::seal_all([("token", self.token.as_deref()), ("refresh", self.refresh_token.as_deref())]);
+        if self.token.is_some() {
+            disk.token_sealed = token;
         }
-        if let Some(t) = &self.refresh_token {
-            disk.refresh_sealed = crate::secret::seal("refresh", t);
+        if self.refresh_token.is_some() {
+            disk.refresh_sealed = refresh;
         }
         // Спрятать некуда (Linux без связки ключей) — открытым текстом, в файле только для владельца.
-        disk.token_plain = if disk.token_sealed.is_none() { self.token.clone() } else { None };
+        // На macOS не вышло — токен на диск не пишем совсем: при следующем запуске войти заново.
+        disk.token_plain = if disk.token_sealed.is_none() && !cfg!(target_os = "macos") { self.token.clone() } else { None };
         if let Ok(s) = serde_json::to_string_pretty(&disk) {
             let path = dir().join("config.json");
             let tmp = dir().join("config.json.tmp");
@@ -183,10 +199,13 @@ impl Config {
         crate::secret::forget("token");
     }
 
-    pub fn forget_refresh(&mut self) {
+    /// Выход из аккаунта: оба токена разом, в связке ключей macOS одной записью.
+    pub fn forget_account(&mut self) {
+        self.token = None;
+        self.token_sealed = None;
         self.refresh_token = None;
         self.refresh_sealed = None;
-        crate::secret::forget("refresh");
+        crate::secret::forget_all(&["token", "refresh"]);
     }
 }
 
@@ -245,3 +264,15 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Старые config.json с ключом `check_updates` (проверка обновлений убрана) читаются как раньше.
+    #[test]
+    fn old_config_with_check_updates_loads() {
+        let c: Config = serde_json::from_str(r#"{"check_updates":false,"volume":0.3}"#).unwrap();
+        assert_eq!(c.volume, 0.3);
+        assert!(!c.gpu);
+    }
+}

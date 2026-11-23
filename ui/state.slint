@@ -163,15 +163,6 @@ export global App {
     in property <string> toast;
     in property <image> toast-cover;
     in property <bool> toast-has-cover;
-    // Новая версия на GitHub (src/update.rs): пусто — обновлений нет.
-    in property <string> update-version;
-    // Установщик скачивается.
-    in property <bool> update-busy;
-    callback update-install();
-    // «Что изменилось»: сравнение запущенной и новой версии на GitHub.
-    callback update-changes();
-    // «Проверять обновления» в настройках.
-    in property <bool> check-updates: true;
     // «Треки 18+» в меню профиля.
     in property <bool> allow-explicit: true;
     // Подсказка у значка «!»: текст дисклеймера рядом с курсором.
@@ -430,10 +421,16 @@ export global App {
     // Статус «Слушает» в профиле Discord и что с ним сейчас.
     in property <bool> discord-on;
     in property <string> discord-status;
-    // Запуск вместе с Windows (сразу в трее).
+    // Есть ли в этой ОС статус Discord; на macOS его нет, и пункт настроек скрыт.
+    in property <bool> discord-supported: true;
+    // GPU-рендер интерфейса (macOS): включается в настройках, применяется после перезапуска.
+    in property <bool> gpu;
+    // Запуск вместе с системой (на Windows и macOS сразу в трее или меню-баре).
     in property <bool> autostart;
     // На Linux нет трея и словарей официального клиента.
     in property <bool> linux;
+    // На macOS вместо трея меню-бар.
+    in property <bool> macos;
     // Есть словари для en/uz/kk (из установленного официального клиента).
     in property <bool> translations: true;
 

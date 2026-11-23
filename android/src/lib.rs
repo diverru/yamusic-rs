@@ -51,9 +51,6 @@ mod stream;
 #[path = "../../src/tags.rs"]
 #[allow(dead_code)]
 mod tags;
-#[path = "../../src/update.rs"]
-#[allow(dead_code)]
-mod update;
 
 mod blob;
 mod download;

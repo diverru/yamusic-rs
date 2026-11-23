@@ -1,7 +1,7 @@
 # Каждый push и PR: clippy, тесты и сборки в артефактах: exe для Windows, .deb, .rpm и
-# AppImage для Linux (x86_64 и aarch64), APK для Android. Тег v* (например v1.0.1): то же
-# и релиз со всеми файлами. Его создаёт отдельное задание после всех сборок. Встроенная
-# обновлялка на Windows ищет в релизе yamusic-rs.exe, на Android — APK.
+# AppImage для Linux (x86_64 и aarch64), .dmg для macOS (один .app для Apple Silicon и Intel),
+# APK для Android. Тег v* (например v1.0.1): то же и релиз со всеми файлами. Его создаёт
+# отдельное задание после всех сборок.
 name: Сборка
 
 on:
@@ -148,6 +148,30 @@ jobs:
           path: ${{ steps.pkg.outputs.rpm }}
           archive: false
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+      - run: tools/bundle_macos.sh --universal --dmg
+
+      - name: SHA-256
+        run: shasum -a 256 target/release/bundle/yamusic-rs-macos-universal.dmg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dmg-universal
+          path: target/release/bundle/yamusic-rs-macos-universal.dmg
+          archive: false
+
   # APK для телефонов (arm64-v8a, Android 8+). Ключ выпуска лежит в секретах репозитория,
   # без него по тегу сборка падает: APK с другой подписью не встанет поверх уже установленного.
   android:
@@ -194,7 +218,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux, linux-arm64, android]
+    needs: [windows, linux, linux-arm64, macos, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

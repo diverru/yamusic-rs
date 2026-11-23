@@ -18,13 +18,11 @@ export global Prof {
     in-out property <bool> kids;
     in-out property <bool> less-ai;
     in-out property <bool> to-end;
-    in-out property <bool> updates;
     in-out property <bool> eq-on;
     in-out property <int> eq-preset;
     in property <[string]> eq-presets;
     in-out property <[float]> eq-gains;
     in property <string> version;
-    in property <string> update;
     callback changed();
     callback less-ai-changed();
     callback eq-changed();
@@ -547,19 +545,8 @@ component SettingsPage inherits Screen {
         Section { text: "Помощь и обратная связь"; }
         SetRow {
             icons: root.icons;
-            title: "Сообщать о новинках";
-            text: "Напомним, когда выйдет новая версия приложения";
-            kind: 1;
-            on: Prof.updates;
-            clicked => {
-                Prof.updates = !Prof.updates;
-                Prof.changed();
-            }
-        }
-        SetRow {
-            icons: root.icons;
             title: "О приложении";
-            text: Prof.update != "" ? "Доступна версия " + Prof.update : "Версия " + Prof.version;
+            text: "Версия " + Prof.version;
             clicked => { Prof.about-open = true; }
         }
         SetRow {
@@ -730,13 +717,10 @@ export component AboutPage inherits Rectangle {
         y: root.height - self.preferred-height - 24px;
         height: self.preferred-height;
         Text {
-            text: "Яндекс Музыка RS " + Prof.version + (Prof.update != "" ? "\nДоступна версия " + Prof.update : "");
+            text: "Яндекс Музыка RS " + Prof.version;
             color: T.fg.with-alpha(0.48);
             font-size: 15px;
             horizontal-alignment: center;
-            TouchArea {
-                clicked => { Prof.link("update"); }
-            }
         }
         Rectangle { height: 16px; }
         AboutLink {

@@ -43,6 +43,14 @@ features = [
   "Win32_System_Com",
 ]
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSAppearance", "NSOpenPanel", "NSPanel", "NSResponder", "NSRunningApplication", "NSScreen", "NSSavePanel", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSArray", "NSGeometry", "NSNotification", "NSObject", "NSString", "NSURL"] }
+# Меню-бар и «Сейчас играет» с медиаклавишами (MPRemoteCommandCenter).
+tray-icon = { version = "0.26", default-features = false }
+souvlaki = { version = "0.9", default-features = false }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 # MPRIS на zbus 5, как у slint: второй копии zbus в сборке нет. async-io и futures-lite

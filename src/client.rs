@@ -74,7 +74,7 @@ pub fn token_allowed(url: &reqwest::Url) -> bool {
     ["yandex.net", "yandex.ru"].iter().any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
-/// Адрес, который можно отдать системе (ShellExecute, xdg-open), если он пришёл с сервера:
+/// Адрес, который можно отдать системе (ShellExecute, xdg-open, open), если он пришёл с сервера:
 /// только https с хостом и без логина в адресе (`https://music.yandex.ru@evil.com` ведёт на
 /// evil.com). `file:`, UNC-пути и обработчики протоколов (`ms-msdt:`, `search-ms:`) через
 /// ShellExecute запускают программы, поэтому всё остальное отбрасывается.
@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn browser_urls() {
         assert_eq!(browser_url("https://music.yandex.ru/promo").as_deref(), Some("https://music.yandex.ru/promo"));
-        assert!(browser_url(" https://github.com/a/b/releases/tag/v1.2.0 ").is_some());
+        assert!(browser_url(" https://music.yandex.ru/promo ").is_some());
         assert!(browser_url("http://music.yandex.ru/").is_none());
         assert!(browser_url("file:///C:/Windows/System32/calc.exe").is_none());
         assert!(browser_url(r"\\evil.com\share\x.exe").is_none());

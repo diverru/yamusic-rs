@@ -3,7 +3,7 @@
 use crate::api::{self, Api};
 use crate::config::{log, Config};
 use crate::player::{Cmd, Player};
-use crate::{eq, original, sys, update, App, Prof, T};
+use crate::{eq, original, sys, App, Prof, T};
 use slint::{ComponentHandle, Image, Model, ModelRc, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,7 +15,6 @@ const SUPPORT_CHAT: &str =
 
 thread_local! {
     static API: RefCell<Option<Arc<Api>>> = const { RefCell::new(None) };
-    static RELEASE_PAGE: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// Картинки тем из APK оригинала.
@@ -46,7 +45,6 @@ pub fn bind(ui: &App, player: &Player) {
     apply_theme(ui);
     p.set_kids(!c.allow_explicit);
     p.set_to_end(c.add_to_end);
-    p.set_updates(c.check_updates);
     p.set_eq_on(c.eq_on);
     p.set_eq_preset(c.eq_preset.min(eq::PRESETS.len() - 1) as i32);
     p.set_eq_gains(gains_model(&c.eq_gains));
@@ -57,9 +55,6 @@ pub fn bind(ui: &App, player: &Player) {
     api::ADD_TO_END.store(c.add_to_end, Relaxed);
     player.send(Cmd::AllowExplicit(c.allow_explicit));
     player.eq.set(c.eq_on, c.eq_preamp, &c.eq_gains);
-    if c.check_updates {
-        check_updates(ui);
-    }
 
     let weak = ui.as_weak();
     let pl = player.clone();
@@ -77,10 +72,6 @@ pub fn bind(ui: &App, player: &Player) {
         c.allow_explicit = allow;
         c.add_to_end = p.get_to_end();
         api::ADD_TO_END.store(c.add_to_end, Relaxed);
-        if p.get_updates() && !c.check_updates {
-            check_updates(&ui);
-        }
-        c.check_updates = p.get_updates();
         c.save();
     });
 
@@ -147,7 +138,6 @@ pub fn bind(ui: &App, player: &Player) {
             "privacy" => "https://yandex.ru/legal/confidential/".into(),
             "recommendations" => "https://music.yandex.ru/legal/recommendations/ru/#music".into(),
             "components" => env!("CARGO_PKG_REPOSITORY").into(),
-            "update" => RELEASE_PAGE.with(|r| r.borrow().clone()),
             _ => return,
         };
         if !url.is_empty() {
@@ -210,22 +200,6 @@ fn apply_theme(ui: &App) {
         _ => sys::night_mode(),
     };
     ui.global::<T>().set_dark(dark);
-}
-
-fn check_updates(ui: &App) {
-    let weak = ui.as_weak();
-    std::thread::spawn(move || match update::check() {
-        Ok(Some(r)) => {
-            let _ = slint::invoke_from_event_loop(move || {
-                RELEASE_PAGE.with(|p| *p.borrow_mut() = r.page);
-                if let Some(ui) = weak.upgrade() {
-                    ui.global::<Prof>().set_update(r.version.into());
-                }
-            });
-        }
-        Ok(None) => {}
-        Err(e) => log(format!("обновления: {e}")),
-    });
 }
 
 fn gains_model(g: &[f32; 10]) -> ModelRc<f32> {

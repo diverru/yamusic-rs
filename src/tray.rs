@@ -27,7 +27,6 @@ pub enum Event {
     PlayPause,
     Prev,
     Next,
-    Updates,
     Terms,
     Recommendations,
     Support,
@@ -160,19 +159,18 @@ fn show_menu(hwnd: HWND) {
             AppendMenuW(m, MF_SEPARATOR, 0, null());
         };
         add(menu, 1, &tr(if s.minimized { "Развернуть" } else { "Свернуть" }), true);
-        add(menu, 2, &tr("Проверить обновления"), true);
         sep(menu);
-        add(menu, 3, &tr(if s.playing { "Пауза" } else { "Воспроизведение" }), true);
-        add(menu, 4, &tr("Предыдущая песня"), s.can_prev);
-        add(menu, 5, &tr("Следующая песня"), s.can_next);
+        add(menu, 2, &tr(if s.playing { "Пауза" } else { "Воспроизведение" }), true);
+        add(menu, 3, &tr("Предыдущая песня"), s.can_prev);
+        add(menu, 4, &tr("Следующая песня"), s.can_next);
         sep(menu);
-        add(about, 6, &tr("Пользовательское соглашение"), true);
-        add(about, 7, &tr("Правила рекомендаций"), true);
-        add(about, 8, &tr("Чат с поддержкой"), true);
+        add(about, 5, &tr("Пользовательское соглашение"), true);
+        add(about, 6, &tr("Правила рекомендаций"), true);
+        add(about, 7, &tr("Чат с поддержкой"), true);
         let w = wide(&tr("О приложении"));
         AppendMenuW(menu, MF_POPUP, about as usize, w.as_ptr());
         sep(menu);
-        add(menu, 9, &tr("Закрыть приложение"), true);
+        add(menu, 8, &tr("Закрыть приложение"), true);
 
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&mut pt);
@@ -183,14 +181,13 @@ fn show_menu(hwnd: HWND) {
         DestroyMenu(menu);
         let e = match cmd {
             1 => Event::Toggle,
-            2 => Event::Updates,
-            3 => Event::PlayPause,
-            4 => Event::Prev,
-            5 => Event::Next,
-            6 => Event::Terms,
-            7 => Event::Recommendations,
-            8 => Event::Support,
-            9 => Event::Quit,
+            2 => Event::PlayPause,
+            3 => Event::Prev,
+            4 => Event::Next,
+            5 => Event::Terms,
+            6 => Event::Recommendations,
+            7 => Event::Support,
+            8 => Event::Quit,
             _ => return,
         };
         emit(e);
